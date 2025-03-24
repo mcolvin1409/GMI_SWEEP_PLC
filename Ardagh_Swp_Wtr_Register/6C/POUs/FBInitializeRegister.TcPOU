@@ -1,0 +1,130 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.10">
+  <POU Name="FBInitializeRegister" Id="{01b6646a-d13f-414d-a3e8-726378d0a2bf}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FBInitializeRegister
+///SDOC/////////////////////////////////////////////////////////////////////////
+//
+//  FBInitializeRegister.TcPOU      - Function Block - Initializing Register Configuration data  - AVT PLC 
+//						Version 1
+//  Author:         Mark Colvin                         Date: Nov 1, 2018
+//
+//	Beckhoff TC3 Structured Text for CX50x0 PLC
+//
+//	includes features:
+//		10 inker enables
+//		Ink ramping
+//		Water ramping
+//		Ink Surge
+//		Water Flood
+//		Ink Ducting (Hold Off)
+//		Ink Wash Up 
+//		Ink Function Control (Off/manual/auto)
+//		water Function Control (off/manual/auto)
+//		Inker positioner with feedback
+//		Water positioner with feedback
+//		Inker Analog Control
+//		water Analog Control
+//		Inker Positioner output cancel
+//		Water Positioner output cancel
+//		Error logging
+//		Analog Calibration - Real-time Support
+//		Plate register support
+///////////////////////////////////////////////////////////////////////SDOCEND//
+
+VAR_INPUT
+
+END_VAR
+VAR_OUTPUT
+END_VAR
+VAR
+	FB_MBReadRegister	:FB_MBReadRegs;	//instance for register - Beckhoff FB from MODBUS/TCP server library
+ 
+	b_RegBusy		:BOOL;			//test only - watch from IDE
+	b_RegBusyTest 	:BOOL:= FALSE;	//test only - watch from IDE
+	b_ReadReg       :BOOL;			// temp for register read
+	errboolI			:BOOL;			//from MODBUS call
+	errboolW			:BOOL;			//from MODBUS call
+	errorRI			:UDINT;			//from MODBUS call
+	errorRW			:UDINT;			//from MODBUS call
+
+	ElapsedTime     	:TIME;			//wait for MODBUS calls to complete
+	TimerTON			:TON;			//wait for MODBUS calls to complete
+	TimerDone		:BOOL;			//wait for MODBUS calls to complete
+	TonIn			:BOOL;			//wait for MODBUS calls to complete
+	w_length	:WORD;			//number of MODBUS data elements transfered to PLC memory
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[
+(************************************************************************************************
+ *
+ *   FUNCTION BLOCK	:FBInitializeRegister
+ *
+ *   Author		:	Mark Colvin
+ *
+ *   Description:	Initializes register controls.  Retrieves the register configuration from 
+ *						MODBUS memory for use in PLC variable space. 
+ *
+ *   Parameters	:	void
+ *
+ *   Returns	:	void	
+ *
+ *   History	:   Nov-1-18	MarkC 	Created
+ *					Dec 4,2018 MarkC fixed length issue and configuration alignment, works now
+ *
+***************************************************************************************************)
+w_length := 10 * 3 * (GVL.w_MAXFOUNTAINS+1); // 10 parameters per fountain, 3 motor types, number of ftns
+
+IF NOT (b_ReadReg) THEN
+   b_ReadReg := TRUE;					// register configuration data read from MODBUS
+   FB_MBReadRegister(
+		sIPAddr:= '172.31.1.91', 	// STRING(15) Is a string containing the IP address of the target device.
+		nTCPPort:= 502, 				// UINT:= MODBUS_TCP_PORT, Port number of the target device.
+		nUnitID:= 16#FF, 				// BYTE:=16#FF,  Identification number of a serial sub-network device. If a device is addressed directly via TCP/IP, this value must be 16#FF.
+		nQuantity:= w_length, 			// WORD, Number of MODBUS output registers (data words) to be read. The value of nQuantity must be > 0. (10 ftns x 20 data points per curve)
+		nMBAddr:= 17000, 				// WORD,  Start address of the MODBUS output registers to be read (word offset)
+										// for some reason, the first addr is used for a special reason and the next addr is used for 1st data element
+		cbLength:= SIZEOF(GVL.w_RegisterConfig),  // UDINT, Contains the max. byte size of the destination buffer. The minimum buffer byte size must be: nQuantity * 2.
+		pDestAddr:= ADR(GVL.w_RegisterConfig), 	//	UDINT, Contains the PLC address of the destination buffer into which the data are to be written to. 
+												//The buffer can be a single variable, an array or a structure, whose address can be found with the ADS operator.
+		bExecute:= TRUE, 				// BOOL, The function block is activated by a rising edge at this input.
+		tTimeout:= T#3S, 				// TIME, States the length of the timeout that may not be exceeded by execution of the ADS command.
+							//VAR_OUTPUT
+		bBusy=> b_RegBusy, 			// BOOL, When the function block is activated this output is set. It remains set until an acknowledgment is received.
+		bError=> errboolI, 			// BOOL, If an ADS error should occur during the transfer of the command, then this output is set once the bBusy output is reset.
+		nErrId=> errorRI, 			// UDINT, Supplies the ADS error number when the bError output is set.
+		cbRead=> );					// UDINT, Contains the number of bytes currently read.
+ELSE 
+	IF NOT FB_MBReadRegister.bBUSY THEN
+		b_ReadReg :=FALSE;			// if the MODBUS read has already started during last PLC cycle and not done yet, keep it active during this cycle.
+	END_IF
+   	FB_MBReadRegister(bExecute:=FALSE);		// keep reading if already started read.
+END_IF 
+
+
+
+// TEST ONLY - debug from IDE
+IF (b_RegBusy = TRUE) THEN
+	b_RegBusyTest:= TRUE;
+END_IF
+
+IF (TimerTON.Q = TRUE) THEN								//if timer is done
+	GVL.mb_Output_Coils[GVL.ENABLEREGISTERINIT]:= FALSE; 	// Don't come back until new initialization
+	TonIn:= FALSE;										// Don't run the timer now.
+	TimerTON(IN:=TonIn  , PT:=T#10S , Q=> , ET=> ); 	//does this turn the .Q to false?
+	RETURN;												//why do we need this return here?
+END_IF
+TonIn:=TRUE;
+TimerTON(IN:=TonIn  , PT:=T#10S , Q=> , ET=>ElapsedTime ); 	// turn on the timer for 10s
+
+//--- end of FBInitializeRegister  ---
+]]></ST>
+    </Implementation>
+    <LineIds Name="FBInitializeRegister">
+      <LineId Id="3" Count="15" />
+      <LineId Id="116" Count="0" />
+      <LineId Id="19" Count="45" />
+      <LineId Id="2" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

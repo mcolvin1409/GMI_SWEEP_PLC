@@ -1,0 +1,3086 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.10">
+  <POU Name="FBRealtimeSupport" Id="{6abeff8e-f12a-423c-ba2e-ae8ec777e99d}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FBRealtimeSupport
+///SDOC/////////////////////////////////////////////////////////////////////////
+//
+//  FBRealtimeSupport.TcPOU      - Function Block - Real-time diagnostic data with analog data - AVT PLC 
+//						Version 3
+//  Author:         Mark Colvin                        Date: Mar 22, 2018
+//
+//	Beckhoff TC3 Structured Text for CX50x0 PLC
+//
+//	includes features:
+//		10 inker enables
+//		Ink ramping
+//		Water ramping
+//		Ink Surge
+//		Water Flood
+//		Ink Ducting (Hold Off)
+//		Ink Wash Up 
+//		Ink Function Control (Off/manual/auto)
+//		water Function Control (off/manual/auto)
+//		Inker positioner with feedback
+//		Water positioner with feedback
+//		Inker Analog Control
+//		water Analog Control
+//		Inker Positioner output cancel
+//		Water Positioner output cancel
+///////////////////////////////////////////////////////////////////////SDOCEND//
+VAR_INPUT
+END_VAR
+VAR_OUTPUT
+END_VAR
+VAR
+	// === LOCAL DATA === NOT saved over power cycles
+	Index			:WORD;	//temp fountain index 
+	Index_offset			:WORD;								//index offset to runtime data for fountains 7 to 10; 0 or 220
+	wCycleCount		:WORD;	//cycle count for ON time for inker/water adjustments
+	nActualScaled	:INT;
+	iActual			:INT;
+	w_output_incr	:INT;
+	w_temp_index 	:WORD;
+	nActualPos		:DINT;					//??
+	nRawFBpos		:INT;					//hardware FB value from pot feedback, used for inverting FB
+
+END_VAR
+VAR CONSTANT
+	FTN1		:WORD:= 0;	//constants for fountain indexes fro IO arrays in TBs
+	FTN2		:WORD:= 1;
+	FTN3		:WORD:= 2;
+	FTN4		:WORD:= 3;
+	FTN5		:WORD:= 4;
+	FTN6		:WORD:= 5;
+	FTN7		:WORD:= 6;
+	FTN8		:WORD:= 7;
+	FTN9		:WORD:= 8;
+	FTN10		:WORD:= 9;
+	wMotorTimeOn :WORD:=500;  //wMotorTimeOn, how long the output is ON for ONE motor adjustment(+ or -), 1000 = 1second
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[
+	Index_offset := GVL.SWPWTR_7_10_FTN_OFFSET;	//ftns 7 to 10, WORDRUNTIME only
+	 CASE GVL.mb_Output_Registers[GVL.REALTIME_DATA_SELECTION] OF		//this is user selection of fountain control to inspect/modify
+	 0:	//do nothing here - first index does nothing
+	 
+	 // Inker analog inputs and outputs
+	 1:	Index := FTN1;		//assign temp index for sweep (ink feed) of this fountain
+		CASE GVL.mb_Output_Registers[GVL.INKERHARDWARETYPE] OF
+		GVL.SWPWTR_TIME:
+			//GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	0;	//nothing to read with FB circuit, just move motor
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN1 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN1] := TRUE;				// turn on the advance output
+					GVL_IO.InkMotorRvs[FTN1] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN1] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN1] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN1 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN1] := FALSE;				// turn on the reverse output
+					GVL_IO.InkMotorRvs[FTN1] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN1] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN1] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_FB:
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.InkInput[FTN1]);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF INT_TO_WORD(GVL_IO.InkInput[FTN1]) < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN1 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN1] := TRUE;				// turn on the advance output
+					GVL_IO.InkMotorRvs[FTN1] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN1] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN1] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter	
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + (FTN10 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN1]) - GVL.w_InkInputIntMin[FTN10]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN10] - GVL.w_InkInputIntMin[FTN10]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF INT_TO_WORD(GVL_IO.InkInput[FTN1]) > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN1 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN1] := FALSE;				// turn on the reverse output
+					GVL_IO.InkMotorRvs[FTN1] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN1] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN1] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + (FTN1 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN1]) - GVL.w_InkInputIntMin[FTN1]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN1] - GVL.w_InkInputIntMin[FTN1]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_OUTPUT:
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.InkSweepOut[FTN1]);
+			IF( GVL.b_DINTInput) THEN									//how big should the adv / ret control increment be?
+				w_output_incr :=  DINT_TO_INT(GVL.d_DINT10V / 100);
+			ELSE
+				w_output_incr := (GVL.i_INT10V / 100);
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN
+				IF (GVL_IO.InkSweepOut[FTN1]) < (w_output_incr *100) THEN
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN1 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkSweepOut[FTN1] := (GVL_IO.InkSweepOut[FTN1]) + w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE;
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF (GVL_IO.InkSweepOut[FTN1]) > w_output_incr THEN
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN1 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkSweepOut[FTN1] := (GVL_IO.InkSweepOut[FTN1]) - w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE;
+			END_IF			
+		END_CASE
+	 2:	Index := FTN2;		//assign temp index for sweep (ink feed) of this fountain
+		CASE GVL.mb_Output_Registers[GVL.INKERHARDWARETYPE] OF
+		GVL.SWPWTR_TIME:
+			//GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	0;	//nothing to read with FB circuit, just move motor
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN2 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN2] := TRUE;				// turn on the advance output
+					GVL_IO.InkMotorRvs[FTN2] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN2] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN2] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN2 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN2] := FALSE;				// turn on the reverse output
+					GVL_IO.InkMotorRvs[FTN2] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN2] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN2] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_FB:
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.InkInput[FTN2]);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF INT_TO_WORD(GVL_IO.InkInput[FTN2]) < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN2 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN2] := TRUE;				// turn on the advance output
+					GVL_IO.InkMotorRvs[FTN2] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN2] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN2] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter	
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + (FTN2 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN2]) - GVL.w_InkInputIntMin[FTN2]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN2] - GVL.w_InkInputIntMin[FTN2]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF INT_TO_WORD(GVL_IO.InkInput[FTN2]) > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN2 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN2] := FALSE;				// turn on the reverse output
+					GVL_IO.InkMotorRvs[FTN2] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN2] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN2] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + (FTN2 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN2]) - GVL.w_InkInputIntMin[FTN2]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN2] - GVL.w_InkInputIntMin[FTN2]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_OUTPUT:
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.InkSweepOut[FTN2]);
+			IF( GVL.b_DINTInput) THEN									//how big should the adv / ret control increment be?
+				w_output_incr :=  DINT_TO_INT(GVL.d_DINT10V / 100);
+			ELSE
+				w_output_incr := (GVL.i_INT10V / 100);
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN
+				IF GVL_IO.InkSweepOut[FTN2] < (w_output_incr *100) THEN
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN2 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkSweepOut[FTN2] := GVL_IO.InkSweepOut[FTN2] + w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE;
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.InkSweepOut[FTN2] > w_output_incr THEN
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN2 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkSweepOut[FTN2] := GVL_IO.InkSweepOut[FTN2] - w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE;
+			END_IF			
+		END_CASE
+	 3:	Index := FTN3;		//assign temp index for sweep (ink feed) of this fountain
+		CASE GVL.mb_Output_Registers[GVL.INKERHARDWARETYPE] OF
+		GVL.SWPWTR_TIME:
+			//GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	0;	//nothing to read with FB circuit, just move motor
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN3 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN3] := TRUE;				// turn on the advance output
+					GVL_IO.InkMotorRvs[FTN3] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN3] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN3] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN3 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN3] := FALSE;				// turn on the reverse output
+					GVL_IO.InkMotorRvs[FTN3] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN3] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN3] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_FB:
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.InkInput[FTN3]);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF INT_TO_WORD(GVL_IO.InkInput[FTN3]) < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN3 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN3] := TRUE;				// turn on the advance output
+					GVL_IO.InkMotorRvs[FTN3] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN3] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN3] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter	
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + (FTN3 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN3]) - GVL.w_InkInputIntMin[FTN3]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN3] - GVL.w_InkInputIntMin[FTN3]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF INT_TO_WORD(GVL_IO.InkInput[FTN3]) > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN3 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN3] := FALSE;				// turn on the reverse output
+					GVL_IO.InkMotorRvs[FTN3] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN3] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN3] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + (FTN3 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN3]) - GVL.w_InkInputIntMin[FTN3]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN3] - GVL.w_InkInputIntMin[FTN3]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_OUTPUT:
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.InkSweepOut[FTN3]);
+			IF( GVL.b_DINTInput) THEN									//how big should the adv / ret control increment be?
+				w_output_incr :=  DINT_TO_INT(GVL.d_DINT10V / 100);
+			ELSE
+				w_output_incr := (GVL.i_INT10V / 100);
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN
+				IF GVL_IO.InkSweepOut[FTN3] < (w_output_incr *100) THEN
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN3 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkSweepOut[FTN3] := GVL_IO.InkSweepOut[FTN3] + w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE;
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.InkSweepOut[FTN3] > w_output_incr THEN
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN3 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkSweepOut[FTN3] := GVL_IO.InkSweepOut[FTN3] - w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE;
+			END_IF			
+		END_CASE
+	 4:	Index := FTN4;		//assign temp index for sweep (ink feed) of this fountain
+		CASE GVL.mb_Output_Registers[GVL.INKERHARDWARETYPE] OF
+		GVL.SWPWTR_TIME:
+			//GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	0;	//nothing to read with FB circuit, just move motor
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN4 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN4] := TRUE;				// turn on the advance output
+					GVL_IO.InkMotorRvs[FTN4] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN4] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN4] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN4 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN4] := FALSE;				// turn on the reverse output
+					GVL_IO.InkMotorRvs[FTN4] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN4] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN4] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_FB:
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.InkInput[FTN4]);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF INT_TO_WORD(GVL_IO.InkInput[FTN4]) < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN4 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN4] := TRUE;				// turn on the advance output
+					GVL_IO.InkMotorRvs[FTN4] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN4] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN4] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter	
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + (FTN4 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN4]) - GVL.w_InkInputIntMin[FTN4]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN4] - GVL.w_InkInputIntMin[FTN4]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF INT_TO_WORD(GVL_IO.InkInput[FTN4]) > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN4 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN4] := FALSE;				// turn on the reverse output
+					GVL_IO.InkMotorRvs[FTN4] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN4] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN4] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + (FTN4 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN4]) - GVL.w_InkInputIntMin[FTN4]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN4] - GVL.w_InkInputIntMin[FTN4]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_OUTPUT:
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.InkSweepOut[FTN4]);
+			IF( GVL.b_DINTInput) THEN									//how big should the adv / ret control increment be?
+				w_output_incr :=  DINT_TO_INT(GVL.d_DINT10V / 100);
+			ELSE
+				w_output_incr := (GVL.i_INT10V / 100);
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN
+				IF GVL_IO.InkSweepOut[FTN4] < (w_output_incr *100) THEN
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN4 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkSweepOut[FTN4] := GVL_IO.InkSweepOut[FTN4] + w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE;
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.InkSweepOut[FTN4] > w_output_incr THEN
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN4 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkSweepOut[FTN4] := GVL_IO.InkSweepOut[FTN4] - w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE;
+			END_IF			
+		END_CASE
+	 5:	Index := FTN5;		//assign temp index for sweep (ink feed) of this fountain
+		CASE GVL.mb_Output_Registers[GVL.INKERHARDWARETYPE] OF
+		GVL.SWPWTR_TIME:
+			//GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	0;	//nothing to read with FB circuit, just move motor
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN5 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN5] := TRUE;				// turn on the advance output
+					GVL_IO.InkMotorRvs[FTN5] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN5] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN5] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN5 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN5] := FALSE;				// turn on the reverse output
+					GVL_IO.InkMotorRvs[FTN5] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN5] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN5] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_FB:
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.InkInput[FTN5]);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF INT_TO_WORD(GVL_IO.InkInput[FTN5]) < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN5 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN5] := TRUE;				// turn on the advance output
+					GVL_IO.InkMotorRvs[FTN5] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN5] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN5] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter	
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + (FTN5 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN5]) - GVL.w_InkInputIntMin[FTN5]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN5] - GVL.w_InkInputIntMin[FTN5]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF INT_TO_WORD(GVL_IO.InkInput[FTN5]) > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN5 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN5] := FALSE;				// turn on the reverse output
+					GVL_IO.InkMotorRvs[FTN5] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN5] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN5] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + (FTN5 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN5]) - GVL.w_InkInputIntMin[FTN5]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN5] - GVL.w_InkInputIntMin[FTN5]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_OUTPUT:
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.InkSweepOut[FTN5]);
+			IF( GVL.b_DINTInput) THEN									//how big should the adv / ret control increment be?
+				w_output_incr :=  DINT_TO_INT(GVL.d_DINT10V / 100);
+			ELSE
+				w_output_incr := (GVL.i_INT10V / 100);
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN
+				IF GVL_IO.InkSweepOut[FTN5] < (w_output_incr *100) THEN
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN5 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkSweepOut[FTN5] := GVL_IO.InkSweepOut[FTN5] + w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE;
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.InkSweepOut[FTN5] > w_output_incr THEN
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN5 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkSweepOut[FTN5] := GVL_IO.InkSweepOut[FTN5] - w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE;
+			END_IF			
+		END_CASE
+	 6:	Index := FTN6;		//assign temp index for sweep (ink feed) of this fountain
+		CASE GVL.mb_Output_Registers[GVL.INKERHARDWARETYPE] OF
+		GVL.SWPWTR_TIME:
+			//GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	0;	//nothing to read with FB circuit, just move motor
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN6 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN6] := TRUE;				// turn on the advance output
+					GVL_IO.InkMotorRvs[FTN6] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN6] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN6] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN6 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN6] := FALSE;				// turn on the reverse output
+					GVL_IO.InkMotorRvs[FTN6] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN6] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN6] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_FB:
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.InkInput[FTN6]);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF INT_TO_WORD(GVL_IO.InkInput[FTN6]) < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN6 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN6] := TRUE;				// turn on the advance output
+					GVL_IO.InkMotorRvs[FTN6] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN6] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN6] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter	
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + (FTN6 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN6]) - GVL.w_InkInputIntMin[FTN6]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN6] - GVL.w_InkInputIntMin[FTN6]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF INT_TO_WORD(GVL_IO.InkInput[FTN6]) > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN6 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN6] := FALSE;				// turn on the reverse output
+					GVL_IO.InkMotorRvs[FTN6] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN6] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN6] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + (FTN6 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN6]) - GVL.w_InkInputIntMin[FTN6]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN6] - GVL.w_InkInputIntMin[FTN6]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_OUTPUT:
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.InkSweepOut[FTN6]);
+			IF( GVL.b_DINTInput) THEN									//how big should the adv / ret control increment be?
+				w_output_incr :=  DINT_TO_INT(GVL.d_DINT10V / 100);
+			ELSE
+				w_output_incr := (GVL.i_INT10V / 100);
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN
+				IF GVL_IO.InkSweepOut[FTN6] < (w_output_incr *100) THEN
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN6 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkSweepOut[FTN6] := GVL_IO.InkSweepOut[FTN6] + w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE;
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.InkSweepOut[FTN6] > w_output_incr THEN
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN6 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkSweepOut[FTN6] := GVL_IO.InkSweepOut[FTN6] - w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE;
+			END_IF			
+		END_CASE
+	 7:	Index := FTN7;		//assign temp index for sweep (ink feed) of this fountain
+		CASE GVL.mb_Output_Registers[GVL.INKERHARDWARETYPE] OF
+		GVL.SWPWTR_TIME:
+			//GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	0;	//nothing to read with FB circuit, just move motor
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN7 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN7] := TRUE;				// turn on the advance output
+					GVL_IO.InkMotorRvs[FTN7] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN7] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN7] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN7 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN7] := FALSE;				// turn on the reverse output
+					GVL_IO.InkMotorRvs[FTN7] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN7] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN7] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_FB:
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.InkInput[FTN7]);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF INT_TO_WORD(GVL_IO.InkInput[FTN7]) < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN7 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN7] := TRUE;				// turn on the advance output
+					GVL_IO.InkMotorRvs[FTN7] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN7] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN7] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter	
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + Index_offset + (FTN7 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN7]) - GVL.w_InkInputIntMin[FTN7]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN7] - GVL.w_InkInputIntMin[FTN7]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF INT_TO_WORD(GVL_IO.InkInput[FTN7]) > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN7 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN7] := FALSE;				// turn on the reverse output
+					GVL_IO.InkMotorRvs[FTN7] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN7] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN7] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + Index_offset + (FTN7 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN7]) - GVL.w_InkInputIntMin[FTN7]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN7] - GVL.w_InkInputIntMin[FTN7]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_OUTPUT:
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.InkSweepOut[FTN7]);
+			IF( GVL.b_DINTInput) THEN									//how big should the adv / ret control increment be?
+				w_output_incr :=  DINT_TO_INT(GVL.d_DINT10V / 100);
+			ELSE
+				w_output_incr := (GVL.i_INT10V / 100);
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN
+				IF GVL_IO.InkSweepOut[FTN7] < (w_output_incr *100) THEN
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN7 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkSweepOut[FTN7] := GVL_IO.InkSweepOut[FTN7] + w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE;
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.InkSweepOut[FTN7] > w_output_incr THEN
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN7 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkSweepOut[FTN7] := GVL_IO.InkSweepOut[FTN7] - w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE;
+			END_IF			
+		END_CASE
+	 8:	Index := FTN8;		//assign temp index for sweep (ink feed) of this fountain
+		CASE GVL.mb_Output_Registers[GVL.INKERHARDWARETYPE] OF
+		GVL.SWPWTR_TIME:
+			//GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	0;	//nothing to read with FB circuit, just move motor
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN8 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN8] := TRUE;				// turn on the advance output
+					GVL_IO.InkMotorRvs[FTN8] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN8] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN8] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN8 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN8] := FALSE;				// turn on the reverse output
+					GVL_IO.InkMotorRvs[FTN8] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN8] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN8] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_FB:
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.InkInput[FTN8]);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF INT_TO_WORD(GVL_IO.InkInput[FTN8]) < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN8 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN8] := TRUE;				// turn on the advance output
+					GVL_IO.InkMotorRvs[FTN8] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN8] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN8] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter	
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + Index_offset + (FTN8 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN8]) - GVL.w_InkInputIntMin[FTN8]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN8] - GVL.w_InkInputIntMin[FTN8]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF INT_TO_WORD(GVL_IO.InkInput[FTN8]) > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN8 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN8] := FALSE;				// turn on the reverse output
+					GVL_IO.InkMotorRvs[FTN8] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN8] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN8] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + Index_offset + (FTN8 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN8]) - GVL.w_InkInputIntMin[FTN8]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN8] - GVL.w_InkInputIntMin[FTN8]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_OUTPUT:
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.InkSweepOut[FTN8]);
+			IF( GVL.b_DINTInput) THEN									//how big should the adv / ret control increment be?
+				w_output_incr :=  DINT_TO_INT(GVL.d_DINT10V / 100);
+			ELSE
+				w_output_incr := (GVL.i_INT10V / 100);
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN
+				IF GVL_IO.InkSweepOut[FTN8] < (w_output_incr *100) THEN
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN8 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkSweepOut[FTN8] := GVL_IO.InkSweepOut[FTN8] + w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE;
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.InkSweepOut[FTN8] > w_output_incr THEN
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN8 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkSweepOut[FTN8] := GVL_IO.InkSweepOut[FTN8] - w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE;
+			END_IF			
+		END_CASE
+	 9:	Index := FTN9;		//assign temp index for sweep (ink feed) of this fountain
+		CASE GVL.mb_Output_Registers[GVL.INKERHARDWARETYPE] OF
+		GVL.SWPWTR_TIME:
+			//GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	0;	//nothing to read with FB circuit, just move motor
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN9 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN9] := TRUE;				// turn on the advance output
+					GVL_IO.InkMotorRvs[FTN9] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN9] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN9] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN9 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN9] := FALSE;				// turn on the reverse output
+					GVL_IO.InkMotorRvs[FTN9] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN9] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN9] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_FB:
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.InkInput[FTN9]);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF INT_TO_WORD(GVL_IO.InkInput[FTN9]) < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN9 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN9] := TRUE;				// turn on the advance output
+					GVL_IO.InkMotorRvs[FTN9] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN9] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN9] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter	
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + Index_offset + (FTN9 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN9]) - GVL.w_InkInputIntMin[FTN9]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN9] - GVL.w_InkInputIntMin[FTN9]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF INT_TO_WORD(GVL_IO.InkInput[FTN9]) > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN9 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN9] := FALSE;				// turn on the reverse output
+					GVL_IO.InkMotorRvs[FTN9] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN9] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN9] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + Index_offset + (FTN9 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN9]) - GVL.w_InkInputIntMin[FTN9]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN9] - GVL.w_InkInputIntMin[FTN9]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_OUTPUT:
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.InkSweepOut[FTN9]);
+			IF( GVL.b_DINTInput) THEN									//how big should the adv / ret control increment be?
+				w_output_incr :=  DINT_TO_INT(GVL.d_DINT10V / 100);
+			ELSE
+				w_output_incr := (GVL.i_INT10V / 100);
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN
+				IF GVL_IO.InkSweepOut[FTN9] < (w_output_incr *100) THEN
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN9 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkSweepOut[FTN9] := GVL_IO.InkSweepOut[FTN9] + w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE;
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.InkSweepOut[FTN9] > w_output_incr THEN
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN9 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkSweepOut[FTN9] := GVL_IO.InkSweepOut[FTN9] - w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE;
+			END_IF			
+		END_CASE
+	 10:Index := FTN10;		//assign temp index for sweep (ink feed) of this fountain
+		CASE GVL.mb_Output_Registers[GVL.INKERHARDWARETYPE] OF
+		GVL.SWPWTR_TIME:
+			//GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	0;	//nothing to read with FB circuit, just move motor
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN10 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN10] := TRUE;				// turn on the advance output
+					GVL_IO.InkMotorRvs[FTN10] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN10] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN10] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN10 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN10] := FALSE;				// turn on the reverse output
+					GVL_IO.InkMotorRvs[FTN10] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN10] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN10] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_FB:
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.InkInput[FTN10]);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF INT_TO_WORD(GVL_IO.InkInput[FTN10]) < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN10 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN10] := TRUE;				// turn on the advance output
+					GVL_IO.InkMotorRvs[FTN10] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN10] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN10] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter	
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + Index_offset + (FTN10 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN10]) - GVL.w_InkInputIntMin[FTN10]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN10] - GVL.w_InkInputIntMin[FTN10]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF INT_TO_WORD(GVL_IO.InkInput[FTN10]) > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN10 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkMotorFwd[FTN10] := FALSE;				// turn on the reverse output
+					GVL_IO.InkMotorRvs[FTN10] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.InkMotorFwd[FTN10] := FALSE;		//turn off outputs
+						GVL_IO.InkMotorRvs[FTN10] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + Index_offset + (FTN10 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN10]) - GVL.w_InkInputIntMin[FTN10]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN10] - GVL.w_InkInputIntMin[FTN10]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_OUTPUT:
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.InkSweepOut[FTN10]);
+			IF( GVL.b_DINTInput) THEN									//how big should the adv / ret control increment be?
+				w_output_incr :=  DINT_TO_INT(GVL.d_DINT10V / 100);
+			ELSE
+				w_output_incr := (GVL.i_INT10V / 100);
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN
+				IF GVL_IO.InkSweepOut[FTN10] < (w_output_incr *100) THEN
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN10 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkSweepOut[FTN10] := GVL_IO.InkSweepOut[FTN10] + w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE;
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.InkSweepOut[FTN10] > w_output_incr THEN
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(FTN10 * GVL.BOOLRUNTIMEGROUPSIZE)] := 	TRUE; //next RUN will force to console target
+					GVL_IO.InkSweepOut[FTN10] := GVL_IO.InkSweepOut[FTN10] - w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE;
+			END_IF			
+		END_CASE
+
+	// Water analog inputs and outputs
+
+  	 11:CASE GVL.mb_Output_Registers[GVL.WATERHARDWARETYPE] OF
+		GVL.SWPWTR_TIME:
+			//GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	0;	//nothing to read with FB circuit, just move motor
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL_IO.WaterMotorFwd[FTN1] := TRUE;				// turn on the advance output
+					GVL_IO.WaterMotorRvs[FTN1] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN1] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN1] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL_IO.WaterMotorFwd[FTN1] := FALSE;				// turn on the reverse output
+					GVL_IO.WaterMotorRvs[FTN1] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN1] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN1] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_FB:
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.WaterInput[FTN1]);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF GVL_IO.WaterInput[FTN1] < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.WaterMotorFwd[FTN1] := TRUE;				// turn on the advance output
+					GVL_IO.WaterMotorRvs[FTN1] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN1] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN1] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + (FTN1 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN1]) - GVL.w_InkInputIntMin[FTN1]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN1] - GVL.w_InkInputIntMin[FTN1]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.WaterInput[FTN1] > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.WaterMotorFwd[FTN1] := FALSE;				// turn on the reverse output
+					GVL_IO.WaterMotorRvs[FTN1] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN1] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN1] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + (FTN1 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN1]) - GVL.w_InkInputIntMin[FTN1]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN1] - GVL.w_InkInputIntMin[FTN1]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_OUTPUT:
+			IF( GVL.b_DINTInput) THEN									//how big should the adv / ret control increment be?
+				w_output_incr :=  DINT_TO_INT(GVL.d_DINT10V / 100);
+			ELSE
+				w_output_incr := (GVL.i_INT10V / 100);
+			END_IF
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.WaterSweepOut[FTN1]);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN
+				IF GVL_IO.WaterSweepOut[FTN1] < (w_output_incr * 100) THEN
+					GVL_IO.WaterSweepOut[FTN1] := GVL_IO.WaterSweepOut[FTN1] + w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE;
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.WaterSweepOut[FTN1] > w_output_incr THEN
+					GVL_IO.WaterSweepOut[FTN1] := GVL_IO.WaterSweepOut[FTN1] - w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE;
+			END_IF			
+		END_CASE
+	 12:CASE GVL.mb_Output_Registers[GVL.WATERHARDWARETYPE] OF
+		GVL.SWPWTR_TIME:
+			//GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	0;	//nothing to read with FB circuit, just move motor
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL_IO.WaterMotorFwd[FTN2] := TRUE;				// turn on the advance output
+					GVL_IO.WaterMotorRvs[FTN2] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN2] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN2] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL_IO.WaterMotorFwd[FTN2] := FALSE;				// turn on the reverse output
+					GVL_IO.WaterMotorRvs[FTN2] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN2] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN2] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_FB:
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.WaterInput[FTN2]);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF GVL_IO.WaterInput[FTN2] < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.WaterMotorFwd[FTN2] := TRUE;				// turn on the advance output
+					GVL_IO.WaterMotorRvs[FTN2] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN2] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN2] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + (FTN2 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN2]) - GVL.w_InkInputIntMin[FTN2]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN2] - GVL.w_InkInputIntMin[FTN2]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.WaterInput[FTN2] > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.WaterMotorFwd[FTN2] := FALSE;				// turn on the reverse output
+					GVL_IO.WaterMotorRvs[FTN2] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN2] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN2] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + (FTN2 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN2]) - GVL.w_InkInputIntMin[FTN2]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN2] - GVL.w_InkInputIntMin[FTN2]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_OUTPUT:
+			IF( GVL.b_DINTInput) THEN									//how big should the adv / ret control increment be?
+				w_output_incr :=  DINT_TO_INT(GVL.d_DINT10V / 100);
+			ELSE
+				w_output_incr := (GVL.i_INT10V / 100);
+			END_IF
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.WaterSweepOut[FTN2]);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN
+				IF GVL_IO.WaterSweepOut[FTN2] < (w_output_incr * 100) THEN
+					GVL_IO.WaterSweepOut[FTN2] := GVL_IO.WaterSweepOut[FTN2] + w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE;
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.WaterSweepOut[FTN2] > w_output_incr THEN
+					GVL_IO.WaterSweepOut[FTN2] := GVL_IO.WaterSweepOut[FTN2] - w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE;
+			END_IF			
+		END_CASE
+	 13:CASE GVL.mb_Output_Registers[GVL.WATERHARDWARETYPE] OF
+		GVL.SWPWTR_TIME:
+			//GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	0;	//nothing to read with FB circuit, just move motor
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL_IO.WaterMotorFwd[FTN3] := TRUE;				// turn on the advance output
+					GVL_IO.WaterMotorRvs[FTN3] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN3] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN3] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL_IO.WaterMotorFwd[FTN3] := FALSE;				// turn on the reverse output
+					GVL_IO.WaterMotorRvs[FTN3] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN3] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN3] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_FB:
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.WaterInput[FTN3]);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF GVL_IO.WaterInput[FTN3] < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.WaterMotorFwd[FTN3] := TRUE;				// turn on the advance output
+					GVL_IO.WaterMotorRvs[FTN3] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN3] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN3] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + (FTN3 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN3]) - GVL.w_InkInputIntMin[FTN3]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN3] - GVL.w_InkInputIntMin[FTN3]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.WaterInput[FTN3] > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.WaterMotorFwd[FTN3] := FALSE;				// turn on the reverse output
+					GVL_IO.WaterMotorRvs[FTN3] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN3] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN3] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + (FTN3 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN3]) - GVL.w_InkInputIntMin[FTN3]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN3] - GVL.w_InkInputIntMin[FTN3]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_OUTPUT:
+			IF( GVL.b_DINTInput) THEN									//how big should the adv / ret control increment be?
+				w_output_incr :=  DINT_TO_INT(GVL.d_DINT10V / 100);
+			ELSE
+				w_output_incr := (GVL.i_INT10V / 100);
+			END_IF
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.WaterSweepOut[FTN3]);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN
+				IF GVL_IO.WaterSweepOut[FTN3] < (w_output_incr * 100) THEN
+					GVL_IO.WaterSweepOut[FTN3] := GVL_IO.WaterSweepOut[FTN3] + w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE;
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.WaterSweepOut[FTN3] > w_output_incr THEN
+					GVL_IO.WaterSweepOut[FTN3] := GVL_IO.WaterSweepOut[FTN3] - w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE;
+			END_IF			
+		END_CASE
+	 14:CASE GVL.mb_Output_Registers[GVL.WATERHARDWARETYPE] OF
+		GVL.SWPWTR_TIME:
+			//GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	0;	//nothing to read with FB circuit, just move motor
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL_IO.WaterMotorFwd[FTN4] := TRUE;				// turn on the advance output
+					GVL_IO.WaterMotorRvs[FTN4] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN4] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN4] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL_IO.WaterMotorFwd[FTN4] := FALSE;				// turn on the reverse output
+					GVL_IO.WaterMotorRvs[FTN4] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN4] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN4] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_FB:
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.WaterInput[FTN4]);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF GVL_IO.WaterInput[FTN4] < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.WaterMotorFwd[FTN4] := TRUE;				// turn on the advance output
+					GVL_IO.WaterMotorRvs[FTN4] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN4] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN4] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + (FTN4 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN4]) - GVL.w_InkInputIntMin[FTN4]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN4] - GVL.w_InkInputIntMin[FTN4]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.WaterInput[FTN4] > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.WaterMotorFwd[FTN4] := FALSE;				// turn on the reverse output
+					GVL_IO.WaterMotorRvs[FTN4] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN4] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN4] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + (FTN4 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN4]) - GVL.w_InkInputIntMin[FTN4]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN4] - GVL.w_InkInputIntMin[FTN4]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_OUTPUT:
+			IF( GVL.b_DINTInput) THEN									//how big should the adv / ret control increment be?
+				w_output_incr :=  DINT_TO_INT(GVL.d_DINT10V / 100);
+			ELSE
+				w_output_incr := (GVL.i_INT10V / 100);
+			END_IF
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.WaterSweepOut[FTN4]);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN
+				IF GVL_IO.WaterSweepOut[FTN4] < (w_output_incr * 100) THEN
+					GVL_IO.WaterSweepOut[FTN4] := GVL_IO.WaterSweepOut[FTN4] + w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE;
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.WaterSweepOut[FTN4] > w_output_incr THEN
+					GVL_IO.WaterSweepOut[FTN4] := GVL_IO.WaterSweepOut[FTN4] - w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE;
+			END_IF			
+		END_CASE
+	 15:CASE GVL.mb_Output_Registers[GVL.WATERHARDWARETYPE] OF
+		GVL.SWPWTR_TIME:
+			//GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	0;	//nothing to read with FB circuit, just move motor
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL_IO.WaterMotorFwd[FTN5] := TRUE;				// turn on the advance output
+					GVL_IO.WaterMotorRvs[FTN5] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN5] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN5] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL_IO.WaterMotorFwd[FTN5] := FALSE;				// turn on the reverse output
+					GVL_IO.WaterMotorRvs[FTN5] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN5] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN5] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_FB:
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.WaterInput[FTN5]);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF GVL_IO.WaterInput[FTN5] < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.WaterMotorFwd[FTN5] := TRUE;				// turn on the advance output
+					GVL_IO.WaterMotorRvs[FTN5] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN5] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN5] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + (FTN5 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN5]) - GVL.w_InkInputIntMin[FTN5]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN5] - GVL.w_InkInputIntMin[FTN5]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.WaterInput[FTN5] > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.WaterMotorFwd[FTN5] := FALSE;				// turn on the reverse output
+					GVL_IO.WaterMotorRvs[FTN5] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN5] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN5] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + (FTN5 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN5]) - GVL.w_InkInputIntMin[FTN5]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN5] - GVL.w_InkInputIntMin[FTN5]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_OUTPUT:
+			IF( GVL.b_DINTInput) THEN									//how big should the adv / ret control increment be?
+				w_output_incr :=  DINT_TO_INT(GVL.d_DINT10V / 100);
+			ELSE
+				w_output_incr := (GVL.i_INT10V / 100);
+			END_IF
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.WaterSweepOut[FTN5]);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN
+				IF GVL_IO.WaterSweepOut[FTN5] < (w_output_incr * 100) THEN
+					GVL_IO.WaterSweepOut[FTN5] := GVL_IO.WaterSweepOut[FTN5] + w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE;
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.WaterSweepOut[FTN5] > w_output_incr THEN
+					GVL_IO.WaterSweepOut[FTN5] := GVL_IO.WaterSweepOut[FTN5] - w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE;
+			END_IF			
+		END_CASE
+	 16:CASE GVL.mb_Output_Registers[GVL.WATERHARDWARETYPE] OF
+		GVL.SWPWTR_TIME:
+			//GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	0;	//nothing to read with FB circuit, just move motor
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL_IO.WaterMotorFwd[FTN6] := TRUE;				// turn on the advance output
+					GVL_IO.WaterMotorRvs[FTN6] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN6] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN6] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL_IO.WaterMotorFwd[FTN6] := FALSE;				// turn on the reverse output
+					GVL_IO.WaterMotorRvs[FTN6] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN6] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN6] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_FB:
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.WaterInput[FTN6]);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF GVL_IO.WaterInput[FTN6] < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.WaterMotorFwd[FTN6] := TRUE;				// turn on the advance output
+					GVL_IO.WaterMotorRvs[FTN6] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN6] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN6] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + (FTN6 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN6]) - GVL.w_InkInputIntMin[FTN6]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN6] - GVL.w_InkInputIntMin[FTN6]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.WaterInput[FTN6] > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.WaterMotorFwd[FTN6] := FALSE;				// turn on the reverse output
+					GVL_IO.WaterMotorRvs[FTN6] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN6] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN6] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + (FTN6 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN6]) - GVL.w_InkInputIntMin[FTN6]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN6] - GVL.w_InkInputIntMin[FTN6]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_OUTPUT:
+			IF( GVL.b_DINTInput) THEN									//how big should the adv / ret control increment be?
+				w_output_incr :=  DINT_TO_INT(GVL.d_DINT10V / 100);
+			ELSE
+				w_output_incr := (GVL.i_INT10V / 100);
+			END_IF
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.WaterSweepOut[FTN6]);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN
+				IF GVL_IO.WaterSweepOut[FTN6] < (w_output_incr * 100) THEN
+					GVL_IO.WaterSweepOut[FTN6] := GVL_IO.WaterSweepOut[FTN6] + w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE;
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.WaterSweepOut[FTN6] > w_output_incr THEN
+					GVL_IO.WaterSweepOut[FTN6] := GVL_IO.WaterSweepOut[FTN6] - w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE;
+			END_IF			
+		END_CASE
+	 17:CASE GVL.mb_Output_Registers[GVL.WATERHARDWARETYPE] OF
+		GVL.SWPWTR_TIME:
+			//GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	0;	//nothing to read with FB circuit, just move motor
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL_IO.WaterMotorFwd[FTN7] := TRUE;				// turn on the advance output
+					GVL_IO.WaterMotorRvs[FTN7] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN7] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN7] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL_IO.WaterMotorFwd[FTN7] := FALSE;				// turn on the reverse output
+					GVL_IO.WaterMotorRvs[FTN7] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN7] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN7] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_FB:
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.WaterInput[FTN7]);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF GVL_IO.WaterInput[FTN7] < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.WaterMotorFwd[FTN7] := TRUE;				// turn on the advance output
+					GVL_IO.WaterMotorRvs[FTN7] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN7] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN7] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + Index_offset + (FTN7 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN7]) - GVL.w_InkInputIntMin[FTN7]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN7] - GVL.w_InkInputIntMin[FTN7]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.WaterInput[FTN7] > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.WaterMotorFwd[FTN7] := FALSE;				// turn on the reverse output
+					GVL_IO.WaterMotorRvs[FTN7] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN7] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN7] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + Index_offset + (FTN7 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN7]) - GVL.w_InkInputIntMin[FTN7]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN7] - GVL.w_InkInputIntMin[FTN7]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_OUTPUT:
+			IF( GVL.b_DINTInput) THEN									//how big should the adv / ret control increment be?
+				w_output_incr :=  DINT_TO_INT(GVL.d_DINT10V / 100);
+			ELSE
+				w_output_incr := (GVL.i_INT10V / 100);
+			END_IF
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.WaterSweepOut[FTN7]);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN
+				IF GVL_IO.WaterSweepOut[FTN7] < (w_output_incr * 100) THEN
+					GVL_IO.WaterSweepOut[FTN7] := GVL_IO.WaterSweepOut[FTN7] + w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE;
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.WaterSweepOut[FTN7] > w_output_incr THEN
+					GVL_IO.WaterSweepOut[FTN7] := GVL_IO.WaterSweepOut[FTN7] - w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE;
+			END_IF			
+		END_CASE
+	 18:CASE GVL.mb_Output_Registers[GVL.WATERHARDWARETYPE] OF
+		GVL.SWPWTR_TIME:
+			//GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	0;	//nothing to read with FB circuit, just move motor
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL_IO.WaterMotorFwd[FTN8] := TRUE;				// turn on the advance output
+					GVL_IO.WaterMotorRvs[FTN8] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN8] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN8] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL_IO.WaterMotorFwd[FTN8] := FALSE;				// turn on the reverse output
+					GVL_IO.WaterMotorRvs[FTN8] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN8] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN8] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_FB:
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.WaterInput[FTN8]);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF GVL_IO.WaterInput[FTN8] < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.WaterMotorFwd[FTN8] := TRUE;				// turn on the advance output
+					GVL_IO.WaterMotorRvs[FTN8] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN8] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN8] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + Index_offset + (FTN8 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN8]) - GVL.w_InkInputIntMin[FTN8]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN8] - GVL.w_InkInputIntMin[FTN8]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.WaterInput[FTN8] > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.WaterMotorFwd[FTN8] := FALSE;				// turn on the reverse output
+					GVL_IO.WaterMotorRvs[FTN8] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN8] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN8] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + Index_offset + (FTN8 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN8]) - GVL.w_InkInputIntMin[FTN8]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN8] - GVL.w_InkInputIntMin[FTN8]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_OUTPUT:
+			IF( GVL.b_DINTInput) THEN									//how big should the adv / ret control increment be?
+				w_output_incr :=  DINT_TO_INT(GVL.d_DINT10V / 100);
+			ELSE
+				w_output_incr := (GVL.i_INT10V / 100);
+			END_IF
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.WaterSweepOut[FTN8]);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN
+				IF GVL_IO.WaterSweepOut[FTN8] < (w_output_incr * 100) THEN
+					GVL_IO.WaterSweepOut[FTN8] := GVL_IO.WaterSweepOut[FTN8] + w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE;
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.WaterSweepOut[FTN8] > w_output_incr THEN
+					GVL_IO.WaterSweepOut[FTN8] := GVL_IO.WaterSweepOut[FTN8] - w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE;
+			END_IF			
+		END_CASE
+	 19:CASE GVL.mb_Output_Registers[GVL.WATERHARDWARETYPE] OF
+		GVL.SWPWTR_TIME:
+			//GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	0;	//nothing to read with FB circuit, just move motor
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL_IO.WaterMotorFwd[FTN9] := TRUE;				// turn on the advance output
+					GVL_IO.WaterMotorRvs[FTN9] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN9] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN9] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL_IO.WaterMotorFwd[FTN9] := FALSE;				// turn on the reverse output
+					GVL_IO.WaterMotorRvs[FTN9] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN9] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN9] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_FB:
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.WaterInput[FTN9]);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF GVL_IO.WaterInput[FTN9] < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.WaterMotorFwd[FTN9] := TRUE;				// turn on the advance output
+					GVL_IO.WaterMotorRvs[FTN9] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN9] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN9] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + Index_offset + (FTN9 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN9]) - GVL.w_InkInputIntMin[FTN9]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN9] - GVL.w_InkInputIntMin[FTN9]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.WaterInput[FTN9] > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.WaterMotorFwd[FTN9] := FALSE;				// turn on the reverse output
+					GVL_IO.WaterMotorRvs[FTN9] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN9] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN9] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + Index_offset + (FTN9 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN9]) - GVL.w_InkInputIntMin[FTN9]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN9] - GVL.w_InkInputIntMin[FTN9]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_OUTPUT:
+			IF( GVL.b_DINTInput) THEN									//how big should the adv / ret control increment be?
+				w_output_incr :=  DINT_TO_INT(GVL.d_DINT10V / 100);
+			ELSE
+				w_output_incr := (GVL.i_INT10V / 100);
+			END_IF
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.WaterSweepOut[FTN9]);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN
+				IF GVL_IO.WaterSweepOut[FTN9] < (w_output_incr * 100) THEN
+					GVL_IO.WaterSweepOut[FTN9] := GVL_IO.WaterSweepOut[FTN9] + w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE;
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.WaterSweepOut[FTN9] > w_output_incr THEN
+					GVL_IO.WaterSweepOut[FTN9] := GVL_IO.WaterSweepOut[FTN9] - w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE;
+			END_IF			
+		END_CASE
+	 20:CASE GVL.mb_Output_Registers[GVL.WATERHARDWARETYPE] OF
+		GVL.SWPWTR_TIME:
+			//GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	0;	//nothing to read with FB circuit, just move motor
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL_IO.WaterMotorFwd[FTN10] := TRUE;				// turn on the advance output
+					GVL_IO.WaterMotorRvs[FTN10] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN10] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN10] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF TRUE THEN							//test the FB for limit - can't do this, pass through
+					GVL_IO.WaterMotorFwd[FTN10] := FALSE;				// turn on the reverse output
+					GVL_IO.WaterMotorRvs[FTN10] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN10] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN10] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_FB:
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.WaterInput[FTN10]);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF GVL_IO.WaterInput[FTN10] < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.WaterMotorFwd[FTN10] := TRUE;				// turn on the advance output
+					GVL_IO.WaterMotorRvs[FTN10] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN10] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN10] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + Index_offset + (FTN10 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN10]) - GVL.w_InkInputIntMin[FTN10]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN10] - GVL.w_InkInputIntMin[FTN10]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.WaterInput[FTN10] > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.WaterMotorFwd[FTN10] := FALSE;				// turn on the reverse output
+					GVL_IO.WaterMotorRvs[FTN10] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF wCycleCount > wMotorTimeOn THEN				//done with timer?
+						GVL_IO.WaterMotorFwd[FTN10] := FALSE;		//turn off outputs
+						GVL_IO.WaterMotorRvs[FTN10] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+						GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + Index_offset + (FTN10 * GVL.WORDRUNTIMEGROUPSIZE)]	:= (INT_TO_WORD(GVL_IO.InkInput[FTN10]) - GVL.w_InkInputIntMin[FTN10]) * 
+								(GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]+1) / (GVL.w_InkInputIntMax[FTN10] - GVL.w_InkInputIntMin[FTN10]);
+						//need the onpress setting pointed to the current % sweep of the positioner
+					END_IF
+				END_IF
+			END_IF
+		GVL.SWPWTR_OUTPUT:
+			IF( GVL.b_DINTInput) THEN									//how big should the adv / ret control increment be?
+				w_output_incr :=  DINT_TO_INT(GVL.d_DINT10V / 100);
+			ELSE
+				w_output_incr := (GVL.i_INT10V / 100);
+			END_IF
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.WaterSweepOut[FTN10]);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN
+				IF GVL_IO.WaterSweepOut[FTN10] < (w_output_incr * 100) THEN
+					GVL_IO.WaterSweepOut[FTN10] := GVL_IO.WaterSweepOut[FTN10] + w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE;
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.WaterSweepOut[FTN10] > w_output_incr THEN
+					GVL_IO.WaterSweepOut[FTN10] := GVL_IO.WaterSweepOut[FTN10] - w_output_incr;
+				END_IF
+				GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE;
+			END_IF			
+		END_CASE
+	 21:   							//press speed analog monitoring
+		IF (GVL.b_DINTInput) THEN 
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	DINT_TO_WORD(GVL_IO.d_PressSpeed/(GVL.d_DINT10V/GVL.i_INT10V))*10;	//press speed (int type)
+		ELSE
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.i_PressSpeed);	//press speed (int type)
+		END_IF
+		GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean - no adjustment possible here
+		GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+	 22:	//Circ FB Ftn 1
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.CircMotorPot[FTN1]);
+			w_temp_index	:= GVL.RUNREG_START+(GVL.RUNREG_SIZE*3*FTN1)+(GVL.RUNREG_SIZE*GVL.iCIRC);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF GVL_IO.CircMotorPot[FTN1] < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.CircMotorRelay[FTN1,GVL.iPlus] := TRUE;				// turn on the advance output
+					GVL_IO.CircMotorRelay[FTN1,GVL.iMinus] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.CircMotorLimit[FTN1,GVL.iPlus] OR
+							GVL_IO.CircMotorLimit[FTN1,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.CircMotorRelay[FTN1,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.CircMotorRelay[FTN1,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.CircMotorPot[FTN1];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ]) +						//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,1 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,3 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.CircMotorPot[FTN1] > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.CircMotorRelay[FTN1,GVL.iPlus] := FALSE;				// turn on the reverse output
+					GVL_IO.CircMotorRelay[FTN1,GVL.iMinus] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.CircMotorLimit[FTN1,GVL.iPlus] OR
+							GVL_IO.CircMotorLimit[FTN1,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.CircMotorRelay[FTN1,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.CircMotorRelay[FTN1,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.CircMotorPot[FTN1];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ]) +						//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,1 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,3 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+					END_IF
+				END_IF
+			END_IF
+	 23:	//Circ FB Ftn 2
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.CircMotorPot[FTN2]);
+			w_temp_index	:= GVL.RUNREG_START+(GVL.RUNREG_SIZE*3*FTN2)+(GVL.RUNREG_SIZE*GVL.iCIRC);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF GVL_IO.CircMotorPot[FTN2] < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.CircMotorRelay[FTN2,GVL.iPlus] := TRUE;				// turn on the advance output
+					GVL_IO.CircMotorRelay[FTN2,GVL.iMinus] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.CircMotorLimit[FTN2,GVL.iPlus] OR
+							GVL_IO.CircMotorLimit[FTN2,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.CircMotorRelay[FTN2,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.CircMotorRelay[FTN2,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.CircMotorPot[FTN2];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ]) +						//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,1 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,3 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.CircMotorPot[FTN2] > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.CircMotorRelay[FTN2,GVL.iPlus] := FALSE;				// turn on the reverse output
+					GVL_IO.CircMotorRelay[FTN2,GVL.iMinus] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.CircMotorLimit[FTN2,GVL.iPlus] OR
+							GVL_IO.CircMotorLimit[FTN2,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.CircMotorRelay[FTN2,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.CircMotorRelay[FTN2,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.CircMotorPot[FTN2];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ]) +						//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,1 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,3 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+					END_IF
+				END_IF
+			END_IF
+	 24:	//Circ FB Ftn 3
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.CircMotorPot[FTN3]);
+			w_temp_index	:= GVL.RUNREG_START+(GVL.RUNREG_SIZE*3*FTN3)+(GVL.RUNREG_SIZE*GVL.iCIRC);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF GVL_IO.CircMotorPot[FTN3] < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.CircMotorRelay[FTN3,GVL.iPlus] := TRUE;				// turn on the advance output
+					GVL_IO.CircMotorRelay[FTN3,GVL.iMinus] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.CircMotorLimit[FTN3,GVL.iPlus] OR
+							GVL_IO.CircMotorLimit[FTN3,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.CircMotorRelay[FTN3,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.CircMotorRelay[FTN3,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.CircMotorPot[FTN3];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ]) +						//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,1 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,3 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.CircMotorPot[FTN3] > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.CircMotorRelay[FTN3,GVL.iPlus] := FALSE;				// turn on the reverse output
+					GVL_IO.CircMotorRelay[FTN3,GVL.iMinus] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.CircMotorLimit[FTN3,GVL.iPlus] OR
+							GVL_IO.CircMotorLimit[FTN3,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.CircMotorRelay[FTN3,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.CircMotorRelay[FTN3,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.CircMotorPot[FTN3];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ]) +						//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,1 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,3 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+					END_IF
+				END_IF
+			END_IF
+	 25:	//Circ FB Ftn 4
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.CircMotorPot[FTN4]);
+			w_temp_index	:= GVL.RUNREG_START+(GVL.RUNREG_SIZE*3*FTN4)+(GVL.RUNREG_SIZE*GVL.iCIRC);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF GVL_IO.CircMotorPot[FTN4] < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.CircMotorRelay[FTN4,GVL.iPlus] := TRUE;				// turn on the advance output
+					GVL_IO.CircMotorRelay[FTN4,GVL.iMinus] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.CircMotorLimit[FTN4,GVL.iPlus] OR
+							GVL_IO.CircMotorLimit[FTN4,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.CircMotorRelay[FTN4,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.CircMotorRelay[FTN4,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.CircMotorPot[FTN4];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ]) +						//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,1 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,3 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.CircMotorPot[FTN4] > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.CircMotorRelay[FTN4,GVL.iPlus] := FALSE;				// turn on the reverse output
+					GVL_IO.CircMotorRelay[FTN4,GVL.iMinus] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.CircMotorLimit[FTN4,GVL.iPlus] OR
+							GVL_IO.CircMotorLimit[FTN4,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.CircMotorRelay[FTN4,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.CircMotorRelay[FTN4,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.CircMotorPot[FTN4];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ]) +						//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,1 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,3 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+					END_IF
+				END_IF
+			END_IF
+	 26:	//Circ FB Ftn 5
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.CircMotorPot[FTN5]);
+			w_temp_index	:= GVL.RUNREG_START+(GVL.RUNREG_SIZE*3*FTN5)+(GVL.RUNREG_SIZE*GVL.iCIRC);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF GVL_IO.CircMotorPot[FTN5] < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.CircMotorRelay[FTN5,GVL.iPlus] := TRUE;				// turn on the advance output
+					GVL_IO.CircMotorRelay[FTN5,GVL.iMinus] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.CircMotorLimit[FTN5,GVL.iPlus] OR
+							GVL_IO.CircMotorLimit[FTN5,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.CircMotorRelay[FTN5,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.CircMotorRelay[FTN5,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.CircMotorPot[FTN5];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ]) +						//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,1 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,3 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.CircMotorPot[FTN5] > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.CircMotorRelay[FTN5,GVL.iPlus] := FALSE;				// turn on the reverse output
+					GVL_IO.CircMotorRelay[FTN5,GVL.iMinus] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.CircMotorLimit[FTN5,GVL.iPlus] OR
+							GVL_IO.CircMotorLimit[FTN5,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.CircMotorRelay[FTN5,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.CircMotorRelay[FTN5,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.CircMotorPot[FTN5];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ]) +						//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,1 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,3 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+					END_IF
+				END_IF
+			END_IF
+	 27:	//Circ FB Ftn 6
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.CircMotorPot[FTN6]);
+		//	FTN 6 special
+			w_temp_index	:= GVL.RUNREG_START+(GVL.RUNREG_SIZE*3*FTN6)+(GVL.RUNREG_SIZE*GVL.iCIRC)+10;
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF GVL_IO.CircMotorPot[FTN6] < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.CircMotorRelay[FTN6,GVL.iPlus] := TRUE;				// turn on the advance output
+					GVL_IO.CircMotorRelay[FTN6,GVL.iMinus] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.CircMotorLimit[FTN6,GVL.iPlus] OR
+							GVL_IO.CircMotorLimit[FTN6,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.CircMotorRelay[FTN6,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.CircMotorRelay[FTN6,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.CircMotorPot[FTN6];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ]) +						//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,1 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,3 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.CircMotorPot[FTN6] > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.CircMotorRelay[FTN6,GVL.iPlus] := FALSE;				// turn on the reverse output
+					GVL_IO.CircMotorRelay[FTN6,GVL.iMinus] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.CircMotorLimit[FTN6,GVL.iPlus] OR
+							GVL_IO.CircMotorLimit[FTN6,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.CircMotorRelay[FTN6,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.CircMotorRelay[FTN6,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.CircMotorPot[FTN6];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ]) +						//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,1 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,3 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+					END_IF
+				END_IF
+			END_IF
+	 28:	//Circ FB Ftn 7
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.CircMotorPot[FTN7]);
+			w_temp_index	:= GVL.RUNREG_START+(GVL.RUNREG_SIZE*3*FTN7)+(GVL.RUNREG_SIZE*GVL.iCIRC)+10;
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF GVL_IO.CircMotorPot[FTN7] < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.CircMotorRelay[FTN7,GVL.iPlus] := TRUE;				// turn on the advance output
+					GVL_IO.CircMotorRelay[FTN7,GVL.iMinus] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.CircMotorLimit[FTN7,GVL.iPlus] OR
+							GVL_IO.CircMotorLimit[FTN7,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.CircMotorRelay[FTN7,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.CircMotorRelay[FTN7,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.CircMotorPot[FTN7];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ]) +						//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,1 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,3 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.CircMotorPot[FTN7] > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.CircMotorRelay[FTN7,GVL.iPlus] := FALSE;				// turn on the reverse output
+					GVL_IO.CircMotorRelay[FTN7,GVL.iMinus] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.CircMotorLimit[FTN7,GVL.iPlus] OR
+							GVL_IO.CircMotorLimit[FTN7,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.CircMotorRelay[FTN7,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.CircMotorRelay[FTN7,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.CircMotorPot[FTN7];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ]) +						//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,1 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,3 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+					END_IF
+				END_IF
+			END_IF
+	 29:	//Circ FB Ftn 8
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.CircMotorPot[FTN8]);
+			w_temp_index	:= GVL.RUNREG_START+(GVL.RUNREG_SIZE*3*FTN8)+(GVL.RUNREG_SIZE*GVL.iCIRC)+10;
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF GVL_IO.CircMotorPot[FTN8] < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.CircMotorRelay[FTN8,GVL.iPlus] := TRUE;				// turn on the advance output
+					GVL_IO.CircMotorRelay[FTN8,GVL.iMinus] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.CircMotorLimit[FTN8,GVL.iPlus] OR
+							GVL_IO.CircMotorLimit[FTN8,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.CircMotorRelay[FTN8,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.CircMotorRelay[FTN8,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.CircMotorPot[FTN8];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ]) +						//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,1 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,3 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.CircMotorPot[FTN8] > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.CircMotorRelay[FTN8,GVL.iPlus] := FALSE;				// turn on the reverse output
+					GVL_IO.CircMotorRelay[FTN8,GVL.iMinus] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.CircMotorLimit[FTN8,GVL.iPlus] OR
+							GVL_IO.CircMotorLimit[FTN8,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.CircMotorRelay[FTN8,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.CircMotorRelay[FTN8,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.CircMotorPot[FTN8];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ]) +						//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,1 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,3 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+					END_IF
+				END_IF
+			END_IF
+	 30:	//Circ FB Ftn 9
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.CircMotorPot[FTN9]);
+			w_temp_index	:= GVL.RUNREG_START+(GVL.RUNREG_SIZE*3*FTN9)+(GVL.RUNREG_SIZE*GVL.iCIRC)+10;
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF GVL_IO.CircMotorPot[FTN9] < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.CircMotorRelay[FTN9,GVL.iPlus] := TRUE;				// turn on the advance output
+					GVL_IO.CircMotorRelay[FTN9,GVL.iMinus] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.CircMotorLimit[FTN9,GVL.iPlus] OR
+							GVL_IO.CircMotorLimit[FTN9,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.CircMotorRelay[FTN9,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.CircMotorRelay[FTN9,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.CircMotorPot[FTN9];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ]) +						//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,1 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,3 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.CircMotorPot[FTN9] > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.CircMotorRelay[FTN9,GVL.iPlus] := FALSE;				// turn on the reverse output
+					GVL_IO.CircMotorRelay[FTN9,GVL.iMinus] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.CircMotorLimit[FTN9,GVL.iPlus] OR
+							GVL_IO.CircMotorLimit[FTN9,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.CircMotorRelay[FTN9,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.CircMotorRelay[FTN9,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.CircMotorPot[FTN9];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ]) +						//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,1 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,3 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+					END_IF
+				END_IF
+			END_IF
+	 31:	//Circ FB Ftn 10
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.CircMotorPot[FTN10]);
+			w_temp_index	:= GVL.RUNREG_START+(GVL.RUNREG_SIZE*3*FTN10)+(GVL.RUNREG_SIZE*GVL.iCIRC)+10;
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF GVL_IO.CircMotorPot[FTN10] < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.CircMotorRelay[FTN10,GVL.iPlus] := TRUE;				// turn on the advance output
+					GVL_IO.CircMotorRelay[FTN10,GVL.iMinus] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.CircMotorLimit[FTN10,GVL.iPlus] OR
+							GVL_IO.CircMotorLimit[FTN10,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.CircMotorRelay[FTN10,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.CircMotorRelay[FTN10,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.CircMotorPot[FTN10];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ]) +						//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,1 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,3 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.CircMotorPot[FTN10] > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.CircMotorRelay[FTN10,GVL.iPlus] := FALSE;				// turn on the reverse output
+					GVL_IO.CircMotorRelay[FTN10,GVL.iMinus] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.CircMotorLimit[FTN10,GVL.iPlus] OR
+							GVL_IO.CircMotorLimit[FTN10,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.CircMotorRelay[FTN10,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.CircMotorRelay[FTN10,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.CircMotorPot[FTN10];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ]) +						//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,1 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iCIRC,3 ] - GVL.w_RegisterConfig[Index,GVL.iCIRC,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+					END_IF
+				END_IF
+			END_IF
+	 32:	//Lateral FB Ftn 1
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.LateralMotorPot[FTN1]);
+			w_temp_index	:= GVL.RUNREG_START+(GVL.RUNREG_SIZE*3*FTN1)+(GVL.RUNREG_SIZE*GVL.iLAT);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF GVL_IO.LateralMotorPot[FTN1] < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.LateralMotorRelay[FTN1,GVL.iPlus] := TRUE;				// turn on the advance output
+					GVL_IO.LateralMotorRelay[FTN1,GVL.iMinus] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.LateralMotorLimit[FTN1,GVL.iPlus] OR
+							GVL_IO.LateralMotorLimit[FTN1,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.LateralMotorRelay[FTN1,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.LateralMotorRelay[FTN1,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.LateralMotorPot[FTN1];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,0 ]) +							//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,1 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,3 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.LateralMotorPot[FTN1] > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.LateralMotorRelay[FTN1,GVL.iPlus] := FALSE;				// turn on the reverse output
+					GVL_IO.LateralMotorRelay[FTN1,GVL.iMinus] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.LateralMotorLimit[FTN1,GVL.iPlus] OR
+							GVL_IO.LateralMotorLimit[FTN1,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.LateralMotorRelay[FTN1,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.LateralMotorRelay[FTN1,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.LateralMotorPot[FTN1];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,0 ]) +							//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,1 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,3 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+					END_IF
+				END_IF
+			END_IF
+	 33:	//Lateral FB Ftn 2
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.LateralMotorPot[FTN2]);
+			w_temp_index	:= GVL.RUNREG_START+(GVL.RUNREG_SIZE*3*FTN2)+(GVL.RUNREG_SIZE*GVL.iLAT);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF GVL_IO.LateralMotorPot[FTN2] < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.LateralMotorRelay[FTN2,GVL.iPlus] := TRUE;				// turn on the advance output
+					GVL_IO.LateralMotorRelay[FTN2,GVL.iMinus] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.LateralMotorLimit[FTN2,GVL.iPlus] OR
+							GVL_IO.LateralMotorLimit[FTN2,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.LateralMotorRelay[FTN2,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.LateralMotorRelay[FTN2,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.LateralMotorPot[FTN2];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,0 ]) +							//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,1 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,3 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.LateralMotorPot[FTN2] > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.LateralMotorRelay[FTN2,GVL.iPlus] := FALSE;				// turn on the reverse output
+					GVL_IO.LateralMotorRelay[FTN2,GVL.iMinus] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.LateralMotorLimit[FTN2,GVL.iPlus] OR
+							GVL_IO.LateralMotorLimit[FTN2,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.LateralMotorRelay[FTN2,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.LateralMotorRelay[FTN2,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.LateralMotorPot[FTN2];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,0 ]) +							//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,1 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,3 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+					END_IF
+				END_IF
+			END_IF
+	 34:	//Lateral FB Ftn 3
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.LateralMotorPot[FTN3]);
+			w_temp_index	:= GVL.RUNREG_START+(GVL.RUNREG_SIZE*3*FTN3)+(GVL.RUNREG_SIZE*GVL.iLAT);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF GVL_IO.LateralMotorPot[FTN3] < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.LateralMotorRelay[FTN3,GVL.iPlus] := TRUE;				// turn on the advance output
+					GVL_IO.LateralMotorRelay[FTN3,GVL.iMinus] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.LateralMotorLimit[FTN3,GVL.iPlus] OR
+							GVL_IO.LateralMotorLimit[FTN3,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.LateralMotorRelay[FTN3,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.LateralMotorRelay[FTN3,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.LateralMotorPot[FTN3];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,0 ]) +							//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,1 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,3 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.LateralMotorPot[FTN3] > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.LateralMotorRelay[FTN3,GVL.iPlus] := FALSE;				// turn on the reverse output
+					GVL_IO.LateralMotorRelay[FTN3,GVL.iMinus] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.LateralMotorLimit[FTN3,GVL.iPlus] OR
+							GVL_IO.LateralMotorLimit[FTN3,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.LateralMotorRelay[FTN3,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.LateralMotorRelay[FTN3,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.LateralMotorPot[FTN3];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,0 ]) +							//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,1 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,3 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+					END_IF
+				END_IF
+			END_IF
+	 35:	//Lateral FB Ftn 4
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.LateralMotorPot[FTN4]);
+			w_temp_index	:= GVL.RUNREG_START+(GVL.RUNREG_SIZE*3*FTN4)+(GVL.RUNREG_SIZE*GVL.iLAT);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF GVL_IO.LateralMotorPot[FTN4] < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.LateralMotorRelay[FTN4,GVL.iPlus] := TRUE;				// turn on the advance output
+					GVL_IO.LateralMotorRelay[FTN4,GVL.iMinus] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.LateralMotorLimit[FTN4,GVL.iPlus] OR
+							GVL_IO.LateralMotorLimit[FTN4,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.LateralMotorRelay[FTN4,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.LateralMotorRelay[FTN4,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.LateralMotorPot[FTN4];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,0 ]) +							//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,1 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,3 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.LateralMotorPot[FTN4] > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.LateralMotorRelay[FTN4,GVL.iPlus] := FALSE;				// turn on the reverse output
+					GVL_IO.LateralMotorRelay[FTN4,GVL.iMinus] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.LateralMotorLimit[FTN4,GVL.iPlus] OR
+							GVL_IO.LateralMotorLimit[FTN4,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.LateralMotorRelay[FTN4,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.LateralMotorRelay[FTN4,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.LateralMotorPot[FTN4];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,0 ]) +							//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,1 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,3 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+					END_IF
+				END_IF
+			END_IF
+	 36:	//Lateral FB Ftn 5
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.LateralMotorPot[FTN5]);
+			w_temp_index	:= GVL.RUNREG_START+(GVL.RUNREG_SIZE*3*FTN5)+(GVL.RUNREG_SIZE*GVL.iLAT);
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF GVL_IO.LateralMotorPot[FTN5] < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.LateralMotorRelay[FTN5,GVL.iPlus] := TRUE;				// turn on the advance output
+					GVL_IO.LateralMotorRelay[FTN5,GVL.iMinus] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.LateralMotorLimit[FTN5,GVL.iPlus] OR
+							GVL_IO.LateralMotorLimit[FTN5,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.LateralMotorRelay[FTN5,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.LateralMotorRelay[FTN5,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.LateralMotorPot[FTN5];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,0 ]) +							//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,1 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,3 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.LateralMotorPot[FTN5] > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.LateralMotorRelay[FTN5,GVL.iPlus] := FALSE;				// turn on the reverse output
+					GVL_IO.LateralMotorRelay[FTN5,GVL.iMinus] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.LateralMotorLimit[FTN5,GVL.iPlus] OR
+							GVL_IO.LateralMotorLimit[FTN5,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.LateralMotorRelay[FTN5,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.LateralMotorRelay[FTN5,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.LateralMotorPot[FTN5];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,0 ]) +							//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,1 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,3 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+					END_IF
+				END_IF
+			END_IF
+	 37:	//Lateral FB Ftn 6
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.LateralMotorPot[FTN6]);
+		//	FTN 6 special
+			w_temp_index	:= GVL.RUNREG_START+(GVL.RUNREG_SIZE*3*FTN6)+(GVL.RUNREG_SIZE*GVL.iLAT)+10;
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF GVL_IO.LateralMotorPot[FTN6] < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.LateralMotorRelay[FTN6,GVL.iPlus] := TRUE;				// turn on the advance output
+					GVL_IO.LateralMotorRelay[FTN6,GVL.iMinus] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.LateralMotorLimit[FTN6,GVL.iPlus] OR
+							GVL_IO.LateralMotorLimit[FTN6,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.LateralMotorRelay[FTN6,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.LateralMotorRelay[FTN6,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.LateralMotorPot[FTN6];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,0 ]) +							//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,1 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,3 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.LateralMotorPot[FTN6] > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.LateralMotorRelay[FTN6,GVL.iPlus] := FALSE;				// turn on the reverse output
+					GVL_IO.LateralMotorRelay[FTN6,GVL.iMinus] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.LateralMotorLimit[FTN6,GVL.iPlus] OR
+							GVL_IO.LateralMotorLimit[FTN6,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.LateralMotorRelay[FTN6,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.LateralMotorRelay[FTN6,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.LateralMotorPot[FTN6];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,0 ]) +							//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,1 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,3 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+					END_IF
+				END_IF
+			END_IF
+	 38:	//Lateral FB Ftn 7
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.LateralMotorPot[FTN7]);
+			w_temp_index	:= GVL.RUNREG_START+(GVL.RUNREG_SIZE*3*FTN7)+(GVL.RUNREG_SIZE*GVL.iLAT)+10;
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF GVL_IO.LateralMotorPot[FTN7] < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.LateralMotorRelay[FTN7,GVL.iPlus] := TRUE;				// turn on the advance output
+					GVL_IO.LateralMotorRelay[FTN7,GVL.iMinus] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.LateralMotorLimit[FTN7,GVL.iPlus] OR
+							GVL_IO.LateralMotorLimit[FTN7,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.LateralMotorRelay[FTN7,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.LateralMotorRelay[FTN7,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.LateralMotorPot[FTN7];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,0 ]) +							//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,1 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,3 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.LateralMotorPot[FTN7] > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.LateralMotorRelay[FTN7,GVL.iPlus] := FALSE;				// turn on the reverse output
+					GVL_IO.LateralMotorRelay[FTN7,GVL.iMinus] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.LateralMotorLimit[FTN7,GVL.iPlus] OR
+							GVL_IO.LateralMotorLimit[FTN7,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.LateralMotorRelay[FTN7,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.LateralMotorRelay[FTN7,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.LateralMotorPot[FTN7];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,0 ]) +							//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,1 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,3 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+					END_IF
+				END_IF
+			END_IF
+	 39:	//Lateral FB Ftn 8
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.LateralMotorPot[FTN8]);
+			w_temp_index	:= GVL.RUNREG_START+(GVL.RUNREG_SIZE*3*FTN8)+(GVL.RUNREG_SIZE*GVL.iLAT)+10;
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF GVL_IO.LateralMotorPot[FTN8] < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.LateralMotorRelay[FTN8,GVL.iPlus] := TRUE;				// turn on the advance output
+					GVL_IO.LateralMotorRelay[FTN8,GVL.iMinus] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.LateralMotorLimit[FTN8,GVL.iPlus] OR
+							GVL_IO.LateralMotorLimit[FTN8,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.LateralMotorRelay[FTN8,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.LateralMotorRelay[FTN8,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.LateralMotorPot[FTN8];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,0 ]) +							//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,1 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,3 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.LateralMotorPot[FTN8] > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.LateralMotorRelay[FTN8,GVL.iPlus] := FALSE;				// turn on the reverse output
+					GVL_IO.LateralMotorRelay[FTN8,GVL.iMinus] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.LateralMotorLimit[FTN8,GVL.iPlus] OR
+							GVL_IO.LateralMotorLimit[FTN8,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.LateralMotorRelay[FTN8,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.LateralMotorRelay[FTN8,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.LateralMotorPot[FTN8];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,0 ]) +							//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,1 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,3 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+					END_IF
+				END_IF
+			END_IF
+	 40:	//Lateral FB Ftn 9
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.LateralMotorPot[FTN9]);
+			w_temp_index	:= GVL.RUNREG_START+(GVL.RUNREG_SIZE*3*FTN9)+(GVL.RUNREG_SIZE*GVL.iLAT)+10;
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF GVL_IO.LateralMotorPot[FTN9] < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.LateralMotorRelay[FTN9,GVL.iPlus] := TRUE;				// turn on the advance output
+					GVL_IO.LateralMotorRelay[FTN9,GVL.iMinus] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.LateralMotorLimit[FTN9,GVL.iPlus] OR
+							GVL_IO.LateralMotorLimit[FTN9,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.LateralMotorRelay[FTN9,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.LateralMotorRelay[FTN9,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.LateralMotorPot[FTN9];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,0 ]) +							//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,1 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,3 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.LateralMotorPot[FTN9] > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.LateralMotorRelay[FTN9,GVL.iPlus] := FALSE;				// turn on the reverse output
+					GVL_IO.LateralMotorRelay[FTN9,GVL.iMinus] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.LateralMotorLimit[FTN9,GVL.iPlus] OR
+							GVL_IO.LateralMotorLimit[FTN9,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.LateralMotorRelay[FTN9,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.LateralMotorRelay[FTN9,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.LateralMotorPot[FTN9];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,0 ]) +							//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,1 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,3 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+					END_IF
+				END_IF
+			END_IF
+	 41:	//Lateral FB Ftn 10
+			GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] :=	INT_TO_WORD(GVL_IO.LateralMotorPot[FTN10]);
+			w_temp_index	:= GVL.RUNREG_START+(GVL.RUNREG_SIZE*3*FTN10)+(GVL.RUNREG_SIZE*GVL.iLAT)+10;
+			IF GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] THEN		//move the motor forward
+				IF GVL_IO.LateralMotorPot[FTN10] < 32000 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.LateralMotorRelay[FTN10,GVL.iPlus] := TRUE;				// turn on the advance output
+					GVL_IO.LateralMotorRelay[FTN10,GVL.iMinus] := FALSE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.LateralMotorLimit[FTN10,GVL.iPlus] OR
+							GVL_IO.LateralMotorLimit[FTN10,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.LateralMotorRelay[FTN10,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.LateralMotorRelay[FTN10,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_ADVANCE] := FALSE; // reset the advance boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.LateralMotorPot[FTN10];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,0 ]) +							//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,1 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,3 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+
+					END_IF
+				END_IF
+			END_IF
+			IF GVL.mb_Output_Coils[GVL.REALTIME_RETARD] THEN
+				IF GVL_IO.LateralMotorPot[FTN10] > 800 THEN				//test the FB for limit - assumes 32767 is max of 10 VDC
+					GVL_IO.LateralMotorRelay[FTN10,GVL.iPlus] := FALSE;				// turn on the reverse output
+					GVL_IO.LateralMotorRelay[FTN10,GVL.iMinus] := TRUE;
+					wCycleCount := wCycleCount + 1;
+					IF (wCycleCount > wMotorTimeOn) OR GVL_IO.LateralMotorLimit[FTN10,GVL.iPlus] OR
+							GVL_IO.LateralMotorLimit[FTN10,GVL.iMinus] THEN	//done with timer or any limit activated
+						GVL_IO.LateralMotorRelay[FTN10,GVL.iPlus] := FALSE;		//turn off outputs
+						GVL_IO.LateralMotorRelay[FTN10,GVL.iMinus] := FALSE;
+						GVL.mb_Output_Coils[GVL.REALTIME_RETARD] := FALSE; // reset the reverse boolean
+						wCycleCount := 0;					//reset the timer counter						
+						nRawFBpos	:=	GVL_IO.LateralMotorPot[FTN10];
+						nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,0 ]) +							//base is min position
+							(((INT_TO_LREAL(nRawFBpos - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,1 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,0 ])))	//total position length
+							/	( INT_TO_LREAL(GVL.w_RegisterConfig[Index,GVL.iLAT,3 ] - GVL.w_RegisterConfig[Index,GVL.iLAT,2 ])))	//total voltage range
+							);
+						GVL.mb_Output_Registers[w_temp_index+(GVL.iActualPosition)]	:= 
+								DINT_TO_WORD(nActualPos);		//post the scaled actual position here to OUTPUT
+					END_IF
+				END_IF
+			END_IF
+//	 42:	//Skew FB Ftn 1 ... not yet...
+	 END_CASE  // end of GVL.REALTIME_DATA_SELECTION
+	 
+//--------------------------------- end of Real-time support ------------------------------------------
+	  ]]></ST>
+    </Implementation>
+    <LineIds Name="FBRealtimeSupport">
+      <LineId Id="9" Count="0" />
+      <LineId Id="4" Count="4" />
+      <LineId Id="1552" Count="0" />
+      <LineId Id="10" Count="42" />
+      <LineId Id="1610" Count="1" />
+      <LineId Id="1609" Count="0" />
+      <LineId Id="53" Count="34" />
+      <LineId Id="1553" Count="0" />
+      <LineId Id="89" Count="77" />
+      <LineId Id="1554" Count="0" />
+      <LineId Id="168" Count="77" />
+      <LineId Id="1555" Count="0" />
+      <LineId Id="247" Count="77" />
+      <LineId Id="1556" Count="0" />
+      <LineId Id="326" Count="77" />
+      <LineId Id="1557" Count="0" />
+      <LineId Id="405" Count="77" />
+      <LineId Id="1558" Count="0" />
+      <LineId Id="484" Count="77" />
+      <LineId Id="1559" Count="0" />
+      <LineId Id="563" Count="77" />
+      <LineId Id="1560" Count="0" />
+      <LineId Id="642" Count="43" />
+      <LineId Id="1503" Count="0" />
+      <LineId Id="686" Count="32" />
+      <LineId Id="1561" Count="0" />
+      <LineId Id="720" Count="357" />
+      <LineId Id="1480" Count="0" />
+      <LineId Id="1079" Count="377" />
+      <LineId Id="2" Count="0" />
+      <LineId Id="1459" Count="20" />
+      <LineId Id="1527" Count="0" />
+      <LineId Id="1481" Count="21" />
+      <LineId Id="1528" Count="0" />
+      <LineId Id="1504" Count="22" />
+      <LineId Id="1529" Count="0" />
+      <LineId Id="1531" Count="20" />
+      <LineId Id="1787" Count="9" />
+      <LineId Id="1562" Count="46" />
+      <LineId Id="1797" Count="2" />
+      <LineId Id="1612" Count="169" />
+      <LineId Id="1851" Count="2" />
+      <LineId Id="1855" Count="0" />
+      <LineId Id="1854" Count="0" />
+      <LineId Id="1782" Count="4" />
+      <LineId Id="2793" Count="5" />
+      <LineId Id="3068" Count="0" />
+      <LineId Id="2799" Count="0" />
+      <LineId Id="1801" Count="20" />
+      <LineId Id="3069" Count="1" />
+      <LineId Id="1823" Count="5" />
+      <LineId Id="2861" Count="3" />
+      <LineId Id="1833" Count="8" />
+      <LineId Id="1844" Count="4" />
+      <LineId Id="3075" Count="1" />
+      <LineId Id="1850" Count="0" />
+      <LineId Id="2800" Count="4" />
+      <LineId Id="2865" Count="3" />
+      <LineId Id="1860" Count="11" />
+      <LineId Id="3077" Count="1" />
+      <LineId Id="1873" Count="5" />
+      <LineId Id="2869" Count="3" />
+      <LineId Id="1883" Count="8" />
+      <LineId Id="1894" Count="4" />
+      <LineId Id="3079" Count="1" />
+      <LineId Id="1900" Count="5" />
+      <LineId Id="2873" Count="3" />
+      <LineId Id="1910" Count="11" />
+      <LineId Id="3081" Count="1" />
+      <LineId Id="1923" Count="5" />
+      <LineId Id="2877" Count="3" />
+      <LineId Id="1933" Count="8" />
+      <LineId Id="1944" Count="4" />
+      <LineId Id="3083" Count="1" />
+      <LineId Id="1950" Count="5" />
+      <LineId Id="2881" Count="3" />
+      <LineId Id="1960" Count="11" />
+      <LineId Id="3085" Count="1" />
+      <LineId Id="1973" Count="5" />
+      <LineId Id="2885" Count="3" />
+      <LineId Id="1983" Count="8" />
+      <LineId Id="1994" Count="4" />
+      <LineId Id="3087" Count="1" />
+      <LineId Id="2000" Count="5" />
+      <LineId Id="2889" Count="3" />
+      <LineId Id="2010" Count="11" />
+      <LineId Id="3089" Count="1" />
+      <LineId Id="2023" Count="5" />
+      <LineId Id="2893" Count="3" />
+      <LineId Id="2033" Count="7" />
+      <LineId Id="3152" Count="0" />
+      <LineId Id="2043" Count="5" />
+      <LineId Id="3091" Count="1" />
+      <LineId Id="2050" Count="5" />
+      <LineId Id="2897" Count="3" />
+      <LineId Id="2060" Count="11" />
+      <LineId Id="3093" Count="1" />
+      <LineId Id="2073" Count="5" />
+      <LineId Id="2901" Count="3" />
+      <LineId Id="2083" Count="8" />
+      <LineId Id="2094" Count="4" />
+      <LineId Id="3095" Count="1" />
+      <LineId Id="2100" Count="5" />
+      <LineId Id="2905" Count="3" />
+      <LineId Id="2110" Count="11" />
+      <LineId Id="3097" Count="1" />
+      <LineId Id="2123" Count="5" />
+      <LineId Id="2909" Count="3" />
+      <LineId Id="2133" Count="8" />
+      <LineId Id="2144" Count="4" />
+      <LineId Id="3099" Count="1" />
+      <LineId Id="2150" Count="5" />
+      <LineId Id="2913" Count="3" />
+      <LineId Id="2160" Count="11" />
+      <LineId Id="3101" Count="1" />
+      <LineId Id="2173" Count="5" />
+      <LineId Id="2917" Count="3" />
+      <LineId Id="2183" Count="8" />
+      <LineId Id="2194" Count="4" />
+      <LineId Id="3103" Count="1" />
+      <LineId Id="2200" Count="5" />
+      <LineId Id="2921" Count="3" />
+      <LineId Id="2210" Count="11" />
+      <LineId Id="3105" Count="1" />
+      <LineId Id="2223" Count="5" />
+      <LineId Id="2925" Count="3" />
+      <LineId Id="2233" Count="8" />
+      <LineId Id="2244" Count="4" />
+      <LineId Id="3107" Count="1" />
+      <LineId Id="2250" Count="5" />
+      <LineId Id="2929" Count="3" />
+      <LineId Id="2260" Count="11" />
+      <LineId Id="3109" Count="1" />
+      <LineId Id="2273" Count="5" />
+      <LineId Id="2933" Count="3" />
+      <LineId Id="2283" Count="8" />
+      <LineId Id="2294" Count="4" />
+      <LineId Id="3111" Count="1" />
+      <LineId Id="2300" Count="21" />
+      <LineId Id="3113" Count="1" />
+      <LineId Id="2323" Count="5" />
+      <LineId Id="2937" Count="3" />
+      <LineId Id="2333" Count="8" />
+      <LineId Id="2344" Count="4" />
+      <LineId Id="3115" Count="1" />
+      <LineId Id="2350" Count="5" />
+      <LineId Id="2941" Count="3" />
+      <LineId Id="2360" Count="11" />
+      <LineId Id="3117" Count="1" />
+      <LineId Id="2373" Count="5" />
+      <LineId Id="2945" Count="3" />
+      <LineId Id="2383" Count="8" />
+      <LineId Id="2394" Count="4" />
+      <LineId Id="3119" Count="1" />
+      <LineId Id="2400" Count="5" />
+      <LineId Id="2949" Count="3" />
+      <LineId Id="2410" Count="11" />
+      <LineId Id="3121" Count="1" />
+      <LineId Id="2423" Count="5" />
+      <LineId Id="2953" Count="3" />
+      <LineId Id="2433" Count="8" />
+      <LineId Id="2444" Count="4" />
+      <LineId Id="3123" Count="1" />
+      <LineId Id="2450" Count="5" />
+      <LineId Id="2957" Count="3" />
+      <LineId Id="2460" Count="11" />
+      <LineId Id="3125" Count="1" />
+      <LineId Id="2473" Count="5" />
+      <LineId Id="2961" Count="3" />
+      <LineId Id="2483" Count="8" />
+      <LineId Id="2494" Count="4" />
+      <LineId Id="3127" Count="1" />
+      <LineId Id="2500" Count="5" />
+      <LineId Id="2965" Count="3" />
+      <LineId Id="2510" Count="11" />
+      <LineId Id="3129" Count="1" />
+      <LineId Id="2523" Count="5" />
+      <LineId Id="2969" Count="3" />
+      <LineId Id="2533" Count="7" />
+      <LineId Id="2542" Count="6" />
+      <LineId Id="3131" Count="1" />
+      <LineId Id="2550" Count="5" />
+      <LineId Id="2973" Count="3" />
+      <LineId Id="2560" Count="11" />
+      <LineId Id="3133" Count="1" />
+      <LineId Id="2573" Count="5" />
+      <LineId Id="2977" Count="3" />
+      <LineId Id="2583" Count="8" />
+      <LineId Id="2594" Count="4" />
+      <LineId Id="3135" Count="1" />
+      <LineId Id="2600" Count="5" />
+      <LineId Id="2981" Count="3" />
+      <LineId Id="2610" Count="11" />
+      <LineId Id="3137" Count="1" />
+      <LineId Id="2623" Count="5" />
+      <LineId Id="2985" Count="3" />
+      <LineId Id="2633" Count="8" />
+      <LineId Id="2644" Count="4" />
+      <LineId Id="3139" Count="1" />
+      <LineId Id="2650" Count="5" />
+      <LineId Id="2989" Count="3" />
+      <LineId Id="2660" Count="11" />
+      <LineId Id="3141" Count="1" />
+      <LineId Id="2673" Count="5" />
+      <LineId Id="2993" Count="3" />
+      <LineId Id="2683" Count="8" />
+      <LineId Id="2694" Count="4" />
+      <LineId Id="3143" Count="1" />
+      <LineId Id="2700" Count="5" />
+      <LineId Id="2997" Count="3" />
+      <LineId Id="2710" Count="11" />
+      <LineId Id="3145" Count="1" />
+      <LineId Id="2723" Count="5" />
+      <LineId Id="3001" Count="3" />
+      <LineId Id="2733" Count="8" />
+      <LineId Id="2744" Count="4" />
+      <LineId Id="3147" Count="1" />
+      <LineId Id="2750" Count="5" />
+      <LineId Id="3005" Count="3" />
+      <LineId Id="2760" Count="11" />
+      <LineId Id="3149" Count="1" />
+      <LineId Id="2773" Count="5" />
+      <LineId Id="3009" Count="3" />
+      <LineId Id="2783" Count="8" />
+      <LineId Id="2805" Count="0" />
+      <LineId Id="3153" Count="1" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

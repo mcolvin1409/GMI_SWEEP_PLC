@@ -1,0 +1,193 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.10">
+  <POU Name="FBWaterSweep_Output" Id="{b1191c13-2ba3-4c17-8d03-3e0a332ded81}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FBWaterSweep_Output
+VAR_INPUT
+END_VAR
+VAR_OUTPUT
+	
+END_VAR
+VAR
+
+///SDOC/////////////////////////////////////////////////////////////////////////
+//
+//  FBWaterSweep.TcPOU      - Function Block - water control with analog voltage outputs - AVT PLC 
+//
+//  Author:         Gary Stefancik                         Date: Aug 23, 2017
+//
+//	Beckhoff TC3 Structured Text for CX50x0 PLC
+//
+//	includes features:
+//		10 inker enables
+//		Ink ramping
+//		Water ramping
+//		Ink Surge
+//		Water Flood
+//		Ink Ducting (Hold Off)
+//		Ink Wash Up 
+//		Ink Function Control (Off/manual/auto)
+//		water Function Control (off/manual/auto)
+//		Inker positioner with feedback
+//		Water positioner with feedback
+//		Inker Analog Control
+//		water Analog Control
+//		Inker Positioner output cancel
+//		Water Positioner output cancel
+///////////////////////////////////////////////////////////////////////SDOCEND//
+
+	// === LOCAL DATA === NOT saved over power cycles
+	w_WaterTrim				:ARRAY[0..GVL.w_MAXFOUNTAINS] OF WORD;	// temp for water trim
+	Index 					:WORD; 								// temp index of the fountain
+	Index_offset			:WORD;								//index offset to runtime data for fountains 7 to 10; 0 or 220
+	r_OutVolt				:REAL;								// temp voltage output for ftn water
+	r_TargetWaterTrim			:ARRAY[0..GVL.w_MAXFOUNTAINS] OF REAL;	// temp real for water trim
+	bError					:ARRAY [0..GVL.w_MAXFOUNTAINS] OF BOOL;	//error recorded from ?? not implemented yet
+//	bRUN					:ARRAY [0..GVL.w_MAXFOUNTAINS] OF BOOL;	//temp RUN bool
+	wError					:WORD;								//temp error code to process later - not yet
+	WaterRUN_TON			:ARRAY[0..GVL.w_MAXFOUNTAINS] OF TON;	//timers for Water_RUN bool activation
+	WaterRUN_RTRIG			:ARRAY[0..GVL.w_MAXFOUNTAINS] OF R_TRIG; // triggers for Water RUN
+	w_target: INT;
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[(************************************************************************************************
+ *
+ *   FUNCTION BLOCK	:FBWaterSweep
+ *
+ *   Author		:	Gary Stefancik
+ *
+ *   Description:	Perform Water Sweep.  Adjust user controlled water trim value while in manual mode and voltage output
+ *
+ *   Parameters	:	void
+ *
+ *   Returns	:	void	
+ *
+ *   History	:   29-Oct-17, GaryS Created
+ *				12-Dec-17	Mark C Removed the magic number with macros WI 143332
+ *				7 Aug 2019 mac - allow to work regardless of WaterOFF bool state.
+***************************************************************************************************)
+
+IF (GVL.mb_Output_Coils[GVL.ENABLEFULLINIT] = FALSE) THEN		//do not process while initializing PLC
+	// FOR all fountains
+	FOR Index := 0 TO (GVL.w_MAXFOUNTAINS) DO
+		//Index := 0;
+		Index_offset := 0;		//ftns 1 to 6, WORDRUNTIME only
+		IF( Index > 5 )THEN
+			Index_offset := GVL.SWPWTR_7_10_FTN_OFFSET;	//ftns 7 to 10, WORDRUNTIME only
+		END_IF	
+		IF (GVL.mb_Output_Coils[GVL.ENABLEFOUNTAIN + Index] = TRUE) THEN // If Fountain enabled
+			IF ((GVL.mb_Output_Registers[GVL.WATERFUNCTSETTING + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] = GVL.AUTO_FUNCTION) AND 
+																			(GVL.mb_Output_Coils[GVL.WATERRAMPINGENABLED])) THEN
+				w_WaterTrim[Index] := GVL.w_WaterRampTrimAdjusted[Index];  														//trim is from AUTO
+			ELSE
+				w_WaterTrim[Index] := GVL.mb_Output_Registers[GVL.WATERTRIM + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)];  //trim is from MANUAL
+			END_IF
+			IF(( w_WaterTrim[Index] <> GVL.w_LastWaterTrim[Index]) OR 
+						GVL.mb_Output_Coils[GVL.WtrControlRUN +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] OR
+						GVL.mb_Output_Coils[GVL.PLCerrorLastRequestWtr +(Index * GVL.BOOLRUNTIMEGROUPSIZE)]) THEN			// if current trim not equal to last trim OR RUN bool is true
+					IF GVL.mb_Output_Coils[GVL.Water_RUNNING +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] = FALSE THEN
+						WaterRUN_TON[Index].IN := FALSE;	//turn off RUN timer here
+					END_IF
+//					bRUN[Index] :=	GVL.mb_Output_Coils[GVL.WtrControlRUN +(Index * GVL.BOOLRUNTIMEGROUPSIZE)];
+					IF(GVL.mb_Output_Coils[GVL.WtrControl_OFF+(Index * GVL.BOOLRUNTIMEGROUPSIZE)] = TRUE) THEN
+						GVL.mb_Output_Registers[GVL.WATERTRIM + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] := GVL.OFF_TRIM_VALUE;			//set trim target to OFF trim value
+						w_WaterTrim[Index] := GVL.mb_Output_Registers[GVL.WATERTRIM + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)];  //trim is from MANUAL
+					END_IF
+		//			w_WaterTrim[Index]:= (GVL.mb_Output_Registers[GVL.WATERTRIM + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]); // Set local WaterTrim target to current trim MB value
+					IF ( w_WaterTrim[Index] < GVL.mb_Output_Registers[GVL.MINWATERTRIM]) THEN 		//  If trim is less than minimum trim 
+						w_WaterTrim[Index]:= GVL.mb_Output_Registers[GVL.MINWATERTRIM]; 			// limit taregt to minimum trim
+					END_IF
+					IF(w_WaterTrim[Index] > GVL.mb_Output_Registers[GVL.MAXWATERTRIM]) THEN  	// if trim is greater then maximum trim 
+						w_WaterTrim[Index]:= GVL.mb_Output_Registers[GVL.MAXWATERTRIM]; 			// limit target to maximum trim
+					END_IF		
+							
+					r_TargetWaterTrim[Index]:= WORD_TO_REAL(w_WaterTrim[Index]);		//convert to real for calcs
+					r_OutVolt:= (GVL.r_WaterOutputMax1PercentInt[Index]  * r_TargetWaterTrim[Index]) + GVL.w_WaterOutputIntMin[Index]; 
+															// Output voltage range is 0-32767 = 0 to 10.0 volts, calc value for the current percent trim (0 to 100%)
+					GVL_IO.WaterSweepOut[Index]:= REAL_TO_INT(r_OutVolt);  			// Set the output voltage in analog ticks (0 to 32767)
+					GVL.w_WaterTrimOnPress2[Index] := w_WaterTrim[Index]; 												//set the on-press trim here too (for power cycle)
+					bError[Index] 			:= FALSE;					//no errors
+					wError 					:= 0;
+// set delay here for 4 seconds for all slaves to see this change
+					IF WaterRUN_TON[Index].IN = FALSE THEN
+						WaterRUN_TON[Index].PT:= T#4000MS; 					// Set PT to  Water RUN activation time
+						WaterRUN_TON[Index].IN:= TRUE;						// Turn on timer
+						// Execute RUN activation Timer
+						GVL.mb_Output_Coils[GVL.Water_RUNNING +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := TRUE;  				//changing the water value now
+					END_IF
+					// Process Count Down Timer
+					WaterRUN_RTRIG[Index](Clk:=WaterRUN_TON[Index].Q); //trigger for TON Q is done
+					IF(WaterRUN_RTRIG[Index].Q) THEN
+						//if waiting for timer, go on to next fountain
+						WaterRUN_TON[Index].IN := FALSE;	//turn off timer here
+						// be sure the Water RUN bool is set for 4 seconds
+	
+						GVL.mb_Output_Registers[GVL.WATERTRIMONPRESS + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] := w_WaterTrim[Index]; 	//set the on-press trim
+						GVL.w_LastWaterTrim[Index] := w_WaterTrim[Index];									//set the last water trim value set
+						GVL.mb_Output_Coils[GVL.PLCerrorLastRequestWtr +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;  // no water error
+						GVL.mb_Output_Coils[GVL.WtrControlRUN +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;  // water not running
+						GVL.mb_Output_Coils[GVL.Water_RUNNING +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;  // not changing the water value now
+//						bRUN[Index] :=	GVL.mb_Output_Coils[GVL.WtrControlRUN +(Index * GVL.BOOLRUNTIMEGROUPSIZE)];
+					END_IF
+			END_IF		//if water trim changed or run the water output
+			WaterRUN_TON[Index](IN:= , PT:= , Q=> , ET=> ); // Run TON if IN is TRUE, set Q TRUE when finished
+		END_IF		//if this fountain is enabled 
+	END_FOR		//all fountains
+
+
+END_IF		//not during full initialize
+	
+//-------------------end of WaterSweep_Output.POU ----------------------------------	]]></ST>
+    </Implementation>
+    <LineIds Name="FBWaterSweep_Output">
+      <LineId Id="3" Count="19" />
+      <LineId Id="213" Count="0" />
+      <LineId Id="23" Count="0" />
+      <LineId Id="80" Count="0" />
+      <LineId Id="255" Count="0" />
+      <LineId Id="121" Count="0" />
+      <LineId Id="379" Count="0" />
+      <LineId Id="574" Count="4" />
+      <LineId Id="371" Count="0" />
+      <LineId Id="375" Count="0" />
+      <LineId Id="374" Count="0" />
+      <LineId Id="381" Count="0" />
+      <LineId Id="372" Count="0" />
+      <LineId Id="24" Count="0" />
+      <LineId Id="26" Count="1" />
+      <LineId Id="432" Count="0" />
+      <LineId Id="580" Count="0" />
+      <LineId Id="433" Count="0" />
+      <LineId Id="431" Count="0" />
+      <LineId Id="28" Count="7" />
+      <LineId Id="123" Count="0" />
+      <LineId Id="164" Count="1" />
+      <LineId Id="168" Count="0" />
+      <LineId Id="170" Count="1" />
+      <LineId Id="364" Count="0" />
+      <LineId Id="377" Count="0" />
+      <LineId Id="366" Count="1" />
+      <LineId Id="363" Count="0" />
+      <LineId Id="310" Count="1" />
+      <LineId Id="368" Count="1" />
+      <LineId Id="313" Count="0" />
+      <LineId Id="300" Count="0" />
+      <LineId Id="169" Count="0" />
+      <LineId Id="256" Count="0" />
+      <LineId Id="36" Count="0" />
+      <LineId Id="480" Count="0" />
+      <LineId Id="527" Count="0" />
+      <LineId Id="382" Count="0" />
+      <LineId Id="370" Count="0" />
+      <LineId Id="37" Count="3" />
+      <LineId Id="2" Count="0" />
+      <LineId Id="55" Count="0" />
+      <LineId Id="257" Count="0" />
+      <LineId Id="76" Count="0" />
+      <LineId Id="383" Count="0" />
+      <LineId Id="78" Count="1" />
+      <LineId Id="384" Count="0" />
+      <LineId Id="581" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

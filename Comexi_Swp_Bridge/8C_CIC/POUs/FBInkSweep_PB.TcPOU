@@ -1,0 +1,141 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.10">
+  <POU Name="FBInkSweep_PB" Id="{36c6e48c-e6ad-492d-82f6-a1907a3fd811}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FBInkSweep_PB
+VAR_INPUT
+END_VAR
+VAR_OUTPUT
+END_VAR
+VAR
+///SDOC/////////////////////////////////////////////////////////////////////////
+//
+//  FBInkSweep_PB.TcPOU      - Function Block - Inker sweep value with Comexi Profibus interface - AVT PLC 
+//						Version 1
+//  Author:         Mark Colvin                         Date: Sept 5, 2018
+//
+//	Beckhoff TC3 Structured Text for CX8190 PLC
+//
+//	includes features:
+//		10 inker enables
+///////////////////////////////////////////////////////////////////////SDOCEND//
+	// === LOCAL DATA === NOT saved over power cycles
+	
+	nScreenValceu				:WORD;								//???
+	Index					:WORD;								// temp word for loop fountain index
+	w_itrgt					:WORD;								// temp index for target sweep % in MB array
+	w_icmpr					:WORD;								//temp index for on-press sweep % in MB array
+	bError					:ARRAY [0..GVL.W_MAXFOUNTAINS] OF BOOL;	//error recorded from PlusMinuswithFB FB
+	wError					:WORD;							//temp error code to process later
+	bRESET					:ARRAY [0..GVL.W_MAXFOUNTAINS] OF BOOL;	// set bool to clear error condition in PlusMinus FB
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[
+(************************************************************************************************
+ *
+ *   FUNCTION BLOCK	:FBInkSweep_PB
+ *
+ *   Author		:	Mark Colvin                         Date: Sept 5, 2018
+ *
+ *   Description:	Perform inker sweep sync of Ink Sweep value in Mercury MODBUS with Comexi Profibus
+ *
+ *   Parameters	:	Global Variables for configuration parameterse 
+ *	Must have the following MB data to/from the Mercury system to complete a sweep change on the Coemxi sweep controller, and mapping data from Comexi controller
+ *			GVL.ENABLEFULLINIT 								- do not process while initializing PLC
+ *			GVL.SWEEPTRIM + (Index * GVL.WORDRUNTIMEGROUPSIZE)	- target sweep value from AppServer console
+ *			GVL.InkSweepRUN +(Index * GVL.BOOLRUNTIMEGROUPSIZE)	- boolean forces sweep value to be set on sweep logic
+ *			GVL.SWEEPTRIMONPRESS + (Index * GVL.WORDRUNTIMEGROUPSIZE) - current on-press value on Profibus (read from Profibus array and stored in the MB array)
+ *			GVL.PLCerrorLastRequestInk+(Index * GVL.BOOLRUNTIMEGROUPSIZE) - there was a problem with last change request
+ *			
+ *			GVL.W_MAXFOUNTAINS 								- number of configured fountains (configured in PLC)
+ *			GVL.ENABLEFOUNTAIN + Index							- check if fountain enabled (configured in PLC)
+ *			GVL.w_LastSweepTrim[Index]							- last sweep value set (stored in the GVL area)
+ 
+ *   Returns	:		changes to Global Variables and Global IO controls
+ *
+ *   History	:   5-Sep-18, MarkC Created
+ *
+***************************************************************************************************)
+
+IF(GVL.mb_Output_Coils[GVL.ENABLEFULLINIT] = FALSE) THEN		//do not process while initializing PLC
+
+	FOR Index := 0 TO GVL.W_MAXFOUNTAINS DO		//normal operations - loop ALL the configured fountains
+	//Index := 0;  //debug a single fountain, one at a time, 0 to max-1
+		bError[Index] := FALSE;				//clear local error flag for each fountain
+		w_itrgt := GVL.SWEEPTRIM + (Index * GVL.WORDRUNTIMEGROUPSIZE);				//target sweep value from AppServer console
+		w_icmpr := GVL.SWEEPTRIMONPRESS + (Index * GVL.WORDRUNTIMEGROUPSIZE);			//current on-press value on Profibus 
+ 		IF( GVL.mb_Output_Coils[GVL.ENABLEFOUNTAIN + Index] ) THEN				// check if fountain enabled,
+			IF(( GVL.mb_Output_Registers[w_itrgt] <> GVL.w_LastSweepTrim[Index]) OR GVL.mb_Output_Coils[GVL.InkSweepRUN +(Index * GVL.BOOLRUNTIMEGROUPSIZE)]) THEN
+				IF( GVL.mb_Output_Registers[w_itrgt] <> GVL.mb_Output_Registers[w_icmpr]) THEN
+//set controller here - if it matters						
+					GVL.mb_Output_Coils[GVL.Inker_RUNNING +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := TRUE;		//flag ink trim motor moving
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := TRUE;
+					GVL.mb_Output_Coils[GVL.PLCerrorLastRequestInk+(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;	// reset bool to show AS no longer in error condition
+				ELSE							//no move needed if trgt and on-press are same
+					GVL.mb_Output_Coils[GVL.Inker_RUNNING +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE; 
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;	//not running now
+					bError[Index] 			:= FALSE;
+					wError 					:= 0;
+					GVL.w_LastSweepTrim[Index] := GVL.mb_Output_Registers[w_itrgt];
+				END_IF										// test the curr trgt% with curr on-press% value
+			ELSE					// curr trgt% is same as last request%; no move required, no error
+	//			GVL.mb_Output_Coils[GVL.Inker_RUNNING +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE; 
+				bError[Index] 			:= FALSE;
+				wError 					:= 0;
+			END_IF
+			IF(bError[Index] ) THEN								//if error code from PlusMinusWithPot FB or FB signal missing or Cancel Output from slave
+				FProcessError(ErrorNumber:= wError ); 				// Set Ink Input Feedback Error for AppServer to process. 
+				GVL.mb_Output_Coils[GVL.PLCerrorLastRequestInk+(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := TRUE;		// set bool to show AS error condition
+				GVL.mb_Output_Coils[GVL.Inker_RUNNING +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE; 
+				GVL.mb_Output_Coils[GVL.InkSweepRUN +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;	//not running now
+				GVL.w_LastSweepTrim[Index] := GVL.mb_Output_Registers[w_itrgt];	// last trim is now requested target trim
+			END_IF	
+		//	GVL.mb_Output_Coils[GVL.InkSweepRUN +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;	//not running now
+			IF( GVL.w_LastSweepOP[Index] <> GVL.mb_Output_Registers[w_icmpr]) THEN			//test OP values from one cycle to next, if different, reset state
+				GVL.mb_Output_Coils[GVL.Inker_RUNNING +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := TRUE;		//flag ink trim motor moving
+				GVL.w_LastSweepOP[Index] := GVL.mb_Output_Registers[w_icmpr];
+				GVL.W_STATE2[Index] := 0;
+			ELSE
+				GVL.W_STATE2[Index] := GVL.W_STATE2[Index] + 1;		//if OP value is same as last sampled, wait for stability for 1 second.
+				GVL.w_LastSweepOP[Index] := GVL.mb_Output_Registers[w_icmpr];
+				IF( GVL.W_STATE2[Index] > 1000 ) THEN									//no chg until 1 second is the same.
+					GVL.mb_Output_Coils[GVL.Inker_RUNNING +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;	//flag ink trim motor (OP) NOT moving
+				END_IF
+			END_IF
+		ELSE				//if ftn not enabled
+			GVL.mb_Output_Coils[GVL.Inker_RUNNING +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE; 
+		END_IF 	
+ 	END_FOR 	//normal operations - loop all fountains here
+END_IF		//not initializing PLC test
+	]]></ST>
+    </Implementation>
+    <LineIds Name="FBInkSweep_PB">
+      <LineId Id="3" Count="26" />
+      <LineId Id="31" Count="5" />
+      <LineId Id="627" Count="0" />
+      <LineId Id="37" Count="1" />
+      <LineId Id="40" Count="0" />
+      <LineId Id="44" Count="0" />
+      <LineId Id="48" Count="0" />
+      <LineId Id="594" Count="0" />
+      <LineId Id="54" Count="2" />
+      <LineId Id="626" Count="0" />
+      <LineId Id="57" Count="1" />
+      <LineId Id="623" Count="0" />
+      <LineId Id="59" Count="7" />
+      <LineId Id="68" Count="1" />
+      <LineId Id="625" Count="0" />
+      <LineId Id="70" Count="0" />
+      <LineId Id="593" Count="0" />
+      <LineId Id="73" Count="0" />
+      <LineId Id="634" Count="1" />
+      <LineId Id="640" Count="0" />
+      <LineId Id="642" Count="0" />
+      <LineId Id="636" Count="1" />
+      <LineId Id="641" Count="0" />
+      <LineId Id="644" Count="2" />
+      <LineId Id="638" Count="0" />
+      <LineId Id="74" Count="5" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

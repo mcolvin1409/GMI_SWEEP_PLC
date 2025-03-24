@@ -1,0 +1,239 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.10">
+  <POU Name="FB_PlusMinusWithFB" Id="{5e88acfa-3567-41cd-88c6-6914ea639d34}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FB_PlusMinusWithFB
+///SDOC/////////////////////////////////////////////////////////////////////////
+//
+//  FB_PlusMinusWithFB.TcPOU      - Function Block - Motor positioner control with pot feedback - AVT PLC 
+//						Modified from DCOS FB file.
+//  Author:         Mark Colvin                        Date: Feb 7, 2018
+//
+//	Beckhoff TC3 Structured Text for CX50x0 PLC
+//
+//	This code is written for EITHER inker or water motor positioners with pot feedback.
+//
+//	This process can be customized for fast or slow motors with these constants in the GVL file:
+//	w_FBTOLERANCE			:WORD:=10;	//FB positioner % tolerance - start to pulse motor instead of 100% on
+//	w_FBFLASHDELAY		:WORD:=250;	//FB positioner Flash delay cycle count (1ms per)
+//	w_FBFLASHON			:WORD:=300;  //FB positioner Flash on time cycle count (1ms per)
+//
+//	includes features:
+//		10 inker enables
+//		Ink ramping
+//		Water ramping
+//		Ink Surge
+//		Water Flood
+//		Ink Ducting (Hold Off)
+//		Ink Wash Up 
+//		Ink Function Control (Off/manual/auto)
+//		water Function Control (off/manual/auto)
+//		Inker positioner with feedback
+//		Water positioner with feedback
+//		Inker Analog Control
+//		water Analog Control
+//		Inker Positioner output cancel
+//		Water Positioner output cancel
+///////////////////////////////////////////////////////////////////////SDOCEND//
+VAR_INPUT
+	// === FB Input parameters, defaults ===
+	iEn		: BOOL;							// need to be on for activating any output
+	iActual		: WORD;						// actual potentiometer value (FB) from analog input, raw A/D INT
+	iRequested	: WORD;						// Requested (target) value, scaled to ActualUnits (% sweep)
+	iRESET		: BOOL;						// reset any previous fault
+	iNrOfStuckCycles			: WORD	:= 100;		// number of PLC scan cycles until FB gives warning at 1ms = 4000 = 4s  
+	iScaleActualMinVal		: WORD	:= 100;		// min INT value from pot (FB), analog input
+	iScaleActualMaxVal		: WORD	:= 32000;	// maximum INT value from pot (FB), analog input
+	iScaleActualUnits			: WORD 	:= 99;		// max scaled units, from 0 to x (usually 99 or 100%)
+	iSETUP_jerkIfClose		: BOOL;				// TRUE to enable jerk when actual is close to requested target,GVL.w_INKTOLERANCE %
+END_VAR
+
+VAR_OUTPUT
+	// === results from FB ===
+	qInc: BOOL;							// motor output BOOL for forward motor direction
+	qDec: BOOL;							//motor output BOOL for reverse motor direction
+	qWarningStuck	: BOOL;					// error flag for motor/FB stuck
+	qErrorCode :WORD;						//error code if error flag
+END_VAR
+VAR
+	// === LOCAL DATA === NOT saved over power cycles
+	nOldReq: WORD;						//previous requested target (% sweep)
+	nOldActual: WORD;						//previous pot value from FB circuit
+	nStuckCount: WORD;					//counter for PLC cycles with no change
+	nActualScaled: WORD;					//calc'd % sweep from current FB and min/max FB values
+	nTESTvar: WORD;						//???
+	R_TRIG_Reset: R_TRIG;					// trigger for the fault reset, performs all of the resetting of data associated with last fault.
+	
+	bInc		: BOOL;						//temp flag for forward motor move
+	bDec		: BOOL;						//temp flag for reverse motor move
+	
+	bFlash: BOOL;							//temp flag for tweaking of the motor movement when FB circuit is close to target
+	TON_flash: Ton;						//timer for motor tweaking
+	bActivateJerk: BOOL;					//temp flag for tweaking (flash) motor output when close to target
+	ELLE: INT;							// ???
+	TON_flash_off: TON;					//another temp timer for controlling fast motor movement, to reduce bouncing of the motor relays.
+	nCycleCounter: WORD;					//temp PLC cycle counter for tweaking motor output
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[
+// offsetting timers for tweaking fast motor moves near the target. de-bouncing relay states when fast motors changing FB circuit very quickly.
+//--- not sure if the timers are de-bouncing or the cycle counter on for 50 ms every 250 ms.???
+TON_flash(IN:= NOT TON_flash.Q AND bActivateJerk, PT:= T#100MS, Q=> , ET=> );
+TON_flash_off(IN:= NOT TON_flash.Q AND bActivateJerk, PT:= T#200MS, Q=> , ET=> );
+
+nCycleCounter	:= nCycleCounter + 1;
+
+bFlash := nCycleCounter >= GVL.w_FBFLASHDELAY;			//bFlash is turned TRUE after 250 ms (1ms per PLC cycle)
+IF bActivateJerk THEN					//bFlash resets during tweaking motor process (bActivateJerk is TRUE)
+	IF  nCycleCounter >= GVL.w_FBFLASHON THEN		
+		nCycleCounter	:= 0 ;			//this reset bFlash after 300 ms
+	END_IF  
+ELSE 
+		nCycleCounter	:= 0 ;			//this keeps bFlash in reset if not tweaking motor process
+END_IF
+(*
+IF TON_flash.Q THEN					//this uses only one timer for bFlash changes. not used now.
+	bFlash	:= NOT bFlash ;
+END_IF
+
+*)
+IF (iActual = 0) AND (iRequested = 0) THEN	//test actual for zero and target for zero (might happen after PLC power cycle)
+	qWarningStuck	:= TRUE;					//   missing FB, flag an error here.
+	qErrorCode := GVL.MISSINGFBSIGNAL; 	// set the error code
+END_IF
+IF(iActual < iScaleActualMinVal) THEN	//Analog ticks - current vs min allowed
+	iActual := iScaleActualMinVal;		//  chg actual to be min allowed if lower
+END_IF
+
+IF(iActual > iScaleActualMaxVal) THEN	//Analog ticks - current vs max allowed
+	iActual := iScaleActualMaxVal;		//  chg actual to be max allowed if higher
+END_IF
+
+//  curr % sweep   curr ticks - min tick allowed      max sweep %            max ticks allowed      min ticks allowed
+nActualScaled	:= (iActual - iScaleActualMinVal) * (iScaleActualUnits+1) / (iScaleActualMaxVal - iScaleActualMinVal);
+
+IF iRequested <> nOldReq THEN				//test new target % vs. the last target %, if not same, something moves
+	IF iRequested > nActualScaled  THEN		//test request % versus curr % from actual FB, 
+										//  if a positive motor change needed, change BOTH the direction flags
+		bInc		:= TRUE;					//move forward, not reverse
+		bDec		:= FALSE;
+	ELSIF iRequested < nActualScaled  THEN	//test request % versus curr % from actual FB, 
+										//  if a negative motor change needed, change BOTH the direction flags
+		bInc		:= FALSE;				//move reverse, not forward
+		bDec		:= TRUE;
+	END_IF
+
+	nStuckCount	:= 0;					//reset the stuck FB cycle count
+	nOldActual	:= nActualScaled;			//record current position %
+	nOldReq		:= iRequested;			//record the request target %
+
+END_IF
+
+
+IF bInc THEN								//if positive change is requested
+	 IF nActualScaled >= iRequested THEN	//if we go TOO FAR, 
+										//  reset direction flag and reset stuck cycle count
+		bInc			:= FALSE;
+		nStuckCount	:= 0;
+		
+	ELSIF nActualScaled > nOldActual THEN	//if going in the CORRECT direction, 
+										//  update the recorded current position and reset stuck cycle count
+		nOldActual	:= nActualScaled;
+		nStuckCount	:= 0;
+	ELSE									//not moving enough to register FB change or really stalled, 
+											// bad feedback or reversed motors
+										//  increase stuck cycle counter
+		nStuckCount	:= nStuckCount + 1;	
+		nTESTvar := nTESTvar + 1;			//????
+	END_IF
+	IF nActualScaled < nOldActual THEN	//if going in the INCORRECT direction, 
+										//  update the recorded current position and x10 stuck cycle count
+		nOldActual	:= nActualScaled;
+		nStuckCount	:= nStuckCount + 10;
+		qErrorCode := GVL.BADMOTORDIRECTION;	//can't have both OUTPUTs TRUE at same time.
+	END_IF
+END_IF
+
+IF bDec THEN								//if negative change is requested
+	 IF nActualScaled <= iRequested THEN	//if we go TOO FAR, 
+										//  reset direction flag and reset stuck cycle count
+		bDec		:= FALSE;
+		nStuckCount	:= 0;
+		
+	ELSIF nActualScaled < nOldActual THEN	//if going in the CORRECT direction, 
+										//  update the recorded current position and reset stuck cycle count
+		nOldActual	:= nActualScaled;
+		nStuckCount	:= 0;
+	ELSE									//not moving enough to register FB change or really stalled,
+										//  increase stuck cycle counter
+		nStuckCount	:= nStuckCount + 1;	
+	END_IF
+	IF nActualScaled > nOldActual THEN	//if going in the INCORRECT direction, 
+										//  update the recorded current position and x10 stuck cycle count
+		nOldActual	:= nActualScaled;
+		nStuckCount	:= nStuckCount + 10;
+		qErrorCode := GVL.BADMOTORDIRECTION;	//can't have both OUTPUTs TRUE at same time.
+	END_IF
+END_IF
+
+IF nStuckCount > iNrOfStuckCycles THEN	//test cycle count vs allowed for cycles stuck
+	qWarningStuck	:= TRUE;				//   too many stuck cycles, flag an error here.
+	qErrorCode := GVL.BADFEEDBACK; 		// set the error code
+END_IF
+
+R_TRIG_Reset(CLK:= iRESET , Q=> );		//this resets the error flag variables if previous error detected and logged.
+
+IF R_TRIG_Reset.Q  THEN
+	qWarningStuck	:= FALSE;			//no error
+	qErrorCode := 0;
+	nStuckCount		:= 0 ;			// reset cycle count
+	nOldReq			:= nOldReq +1;	// to make a new test cycle ???  why bump the last request by 1% ???
+END_IF
+
+
+IF (bInc AND bDec) OR qWarningStuck OR NOT iEn THEN	//opps, should not be moving now: both directions on, error flagged, or ftn not enabled
+	bInc		:= FALSE;
+	bDec		:= FALSE;
+	qErrorCode := GVL.BADMOTORDIRECTION;	//can't have both OUTPUTs TRUE at same time.
+END_IF
+
+IF NOT iSETUP_jerkIfClose THEN		//echo the output flags from the temp direction flags, if not ALLOWED to be in tweaking motor mode
+	qInc		:= bInc;
+	qDec		:= bDec;
+	bActivateJerk	:= FALSE;
+ELSE								//tweaking motor mode is possible, perform some checks first
+	IF bInc AND (nActualScaled + GVL.w_FBTOLERANCE ) > iRequested  THEN	//positive move and actual position is within x% of target
+		bActivateJerk	:= TRUE;							//tweaking mode now on
+		qInc			:= bInc AND bFlash;				//direction flag (MOTOR ON) is affected by flag to pulse the motor on bit.
+		
+	ELSIF bDec AND (nActualScaled - GVL.w_FBTOLERANCE) < iRequested  THEN  //negative move and actual position is within x% of target
+		bActivateJerk	:= TRUE;							//tweaking mode now on
+		qDec			:= bDec AND bFlash;				//direction flag (MOTOR ON) is affected by flag to pulse the motor on bit.
+	ELSIF bDec AND (nActualScaled <= GVL.w_FBTOLERANCE)   THEN  //negative move and actual position is close to zero
+		bActivateJerk	:= TRUE;							//tweaking mode now on
+		qDec			:= bDec AND bFlash;				//direction flag (MOTOR ON) is affected by flag to pulse the motor on bit.
+	ELSE
+		qInc			:= bInc;						//echo the output flags from the temp direction flags, and NOT in tweaking motor mode
+		qDec			:= bDec;
+		bActivateJerk	:= FALSE;
+
+	END_IF
+END_IF
+
+
+]]></ST>
+    </Implementation>
+    <LineIds Name="FB_PlusMinusWithFB">
+      <LineId Id="3" Count="65" />
+      <LineId Id="208" Count="0" />
+      <LineId Id="69" Count="3" />
+      <LineId Id="209" Count="3" />
+      <LineId Id="221" Count="0" />
+      <LineId Id="214" Count="0" />
+      <LineId Id="73" Count="15" />
+      <LineId Id="215" Count="3" />
+      <LineId Id="220" Count="0" />
+      <LineId Id="219" Count="0" />
+      <LineId Id="89" Count="47" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

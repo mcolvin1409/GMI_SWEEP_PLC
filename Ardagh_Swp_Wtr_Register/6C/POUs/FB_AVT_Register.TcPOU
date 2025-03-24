@@ -1,0 +1,451 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.10">
+  <POU Name="FB_AVT_Register" Id="{2dfff9ea-e728-405d-bba1-65ee1289104d}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FB_AVT_Register
+///SDOC/////////////////////////////////////////////////////////////////////////
+//
+//  FB_AVT_Register.TcPOU      -  PLC register moves by time and pot feedback, with limit switches - AVT PLC  
+//
+//  Author:         Johan von Kraemer (DCOS)                        Date: Aug 31, 2018
+//
+//	Beckhoff TC3 Structured Text for CX50x0 PLC
+//
+//	includes features:
+//		10 inker enables
+//		Ink ramping
+//		Water ramping
+//		Ink Surge
+//		Water Flood
+//		Ink Ducting (Hold Off)
+//		Ink Wash Up 
+//		Ink Function Control (Off/manual/auto)
+//		water Function Control (off/manual/auto)
+//		Inker positioner with feedback
+//		Water positioner with feedback
+//		Inker Analog Control
+//		water Analog Control
+//		Inker Positioner output cancel
+//		Water Positioner output cancel
+//		Error logging
+//		Analog Calibration - Real-time Support
+//		Plate register support
+///////////////////////////////////////////////////////////////////////SDOCEND//
+
+	VAR_INPUT
+	
+	iSETUP_MinPos				: INT	:= -300		;		// Minimum position	Set in 0.00 mm x100
+	iSETUP_MaxPos				: INT	:= 	300		;		// Maximum position	Set in 0.00 mm x100
+ 	iSETUP_FBatMin				: INT	:= 3276		;		//  voltage Feedback position at min	Set to feedback
+	iSETUP_FBatMax				: INT	:= 	29500	;		//  voltage Feedback position at max	Set to feedback
+	iSETUP_Velocity				: INT	:= 100	;			// slope x100
+		
+	iSETUP_enFeedBack			: BOOL	;					// Enable pot voltage feedback to calculate status position 
+	iSETUP_enFeedBackPositioing	: BOOL	;					// Enable Feedback positioning	
+															//     if =0 then register will move only on Velocity (slope)
+															
+	iSETUP_enLimitSw			: BOOL	;					// Enable 2 limit switches	1 = limits enabled
+	iSETUP_InvertFB				: BOOL	; 					// pot feedback is reversed, max feedback will be min
+	iSETUP_InvertOutputs		: BOOL	; 					// motor direction outputs are swapped, outputs will be inverted
+	iSETUP_SpeedInterlock		: BOOL	; 					// is the press moving? allow motor change
+
+	iActualPosFB				: INT;						// Actual pot voltage Feedback from hardware, 0 to 32768 is 0 to 10 VDC
+	iLimitSwPlus				: BOOL ;					// limit switch in positive direction is active
+	iLimitSwMinus				: BOOL ;					// limit switch in negative direction is active
+
+	
+	iCONTROL_reqPosition		: INT;						// control register (motor move adjustment) relative, if required
+	iCONTROL_bits				: INT;						// control register bits, see design sheet (command operation booleans)
+								
+	
+END_VAR
+VAR_OUTPUT
+	qRegisterPlus				: BOOL;						// move register motor in positive direction
+	qRegisterMinus				: BOOL;						// move register motor in negatvie direction
+
+	qSTATUS_Position			: INT;						// status register position from pot feedback, scaled for register
+	qSTATUS_bits				: INT;						// status register bits from current request, see design sheet
+	
+END_VAR
+VAR
+	nOldTime: 					LINT;					//used to hold PLC cycle time from last time measurement
+	nTaskTime: 					DINT;					//used to measure PLC cycle time since this function block was last called
+	GETCURTASKINDEX_0: 			GETCURTASKINDEX; 		//Beckhoff system variable
+	
+	nActualPos: 				DINT;					//??
+	nRawFBpos: 					INT;					//hardware FB value from pot feedback, used for inverting FB
+	
+	bErrorSetup: 				BOOL;					//??
+	bErrorStuck: 				BOOL;					//??
+	
+	R_TRIG_Centering: 			R_TRIG;				//internal centering flag
+	R_TRIG_MoveRel: 			R_TRIG;				//internal relative move flag
+	R_TRIG_MoveAbs: 			R_TRIG;				//internal absolute move flag
+	R_TRIG_Reset: 				R_TRIG;				//internal RESET errors flag
+	
+	nMoveTime: 					DINT;		//motor time (plus value is plus direction and negative value is minus direction)
+	bRegPlus: 					BOOL;		//motor move in plus direction
+	bLimitPlus: 				BOOL;		//plus limit switch detected or plus move times out
+	bRegMinus: 					BOOL;		//motor move in minus direction
+	bLimitMinus: 				BOOL;		//minus limit switch detected or minus move times out
+	bMovingRel: 				BOOL;		//motor target value is relative, plus and minus direction and amount
+	bMovingAbs: 				BOOL;		//motor target value is absolute, plus or minus of zero and distance from zero (center)
+	bIsCentering: 				BOOL;		//motor is seeking center of two switches
+
+	nStuckCounter: 				DINT;		//counter for time motor is seen not changing 
+	nOldActualPos: 				DINT;
+	TON_CenteringTimout: 		TON;		//centering seq time out detection
+	bActivateCenteringSeq: 		BOOL;		//enable the centering sequence
+	stateCentre: 				INT;		//centering state
+	nTotalRegisterLenght: 		INT;		//total distance of motor movement allowed
+	TON_CentreStep: 			TON;		//centering state machine timer
+	nCenteringTotalTime: 		DINT;		//time for centering time, used for calc of center position.
+	bErrorCenteringTimout: 		BOOL;		//flag for centering taking too much time
+	nPositioningReq: 			DINT;
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[
+//  AVT PLC HISTORY
+// PLC 4.0 11-1-18 markc 	initial merge in to version AVT PLC 4.0
+// PLC 4.0 11-12-18 markc 	testing by IDE settings
+// PLC 4.2 11-14-18 markc   more testing by manual IDE inputs
+// PLC 4.3 11-15-18 markc   more understanding of motor move logic gained, add bunch of comments
+// PLC 4.8 12-3-18 markc 	ftn5 circ instance issue, control bits are always zero - found in ductor default error
+
+// Get actual CycleTime
+GETCURTASKINDEX_0();
+IF GETCURTASKINDEX_0.index > 0 THEN
+	nTaskTime		:= LINT_TO_DINT((_TaskInfo[GETCURTASKINDEX_0.index].DcTaskTime  - nOldTime) / 1000000); //how much time from last PLC cycle?
+	nOldTime		:= _TaskInfo[GETCURTASKINDEX_0.index].DcTaskTime;
+END_IF
+
+// calculated actual feedback, if available
+IF	iSETUP_FBatMax 	< iSETUP_FBatMin	// max calibration voltage s/b GT min calibration voltage
+OR  iSETUP_MaxPos 	< iSETUP_MinPos 	// max position s/b GT min min position
+OR  iSETUP_Velocity <= 0				// slope setting s/b GT zero
+THEN
+	bErrorSetup		:= TRUE; 			//invalid configuration error is set is above is not true
+ELSE
+	bErrorSetup		:= FALSE;
+	IF NOT iSETUP_InvertFB THEN
+		nRawFBpos		:= iActualPosFB;	//current voltage reading 0 to 10 VDC, seen as 0 to 32767
+	ELSE	
+		nRawFBpos		:= 32767-iActualPosFB;	//inverted voltage reading 
+	END_IF
+	IF iSETUP_enFeedBack THEN					// if pot feedback is available
+		nActualPos		:= 	LREAL_TO_DINT(
+							INT_TO_LREAL(iSETUP_MinPos) +							//base is min position
+							(((INT_TO_LREAL(nRawFBpos - iSETUP_FBatMin)) 			//voltage offset from low calibration
+							* 	(INT_TO_LREAL(iSETUP_MaxPos - iSETUP_MinPos)))		//total position length
+							/	( INT_TO_LREAL(iSETUP_FBatMax - iSETUP_FBatMin)))	//total voltage range
+							);
+	ELSE
+		nActualPos		:= 0;
+	END_IF
+END_IF
+
+nTotalRegisterLenght	:= iSETUP_MaxPos - iSETUP_MinPos;	//total length of motor movement in MM x100
+
+
+// create triggers from command bits
+R_TRIG_Centering	(CLK:= iCONTROL_bits.4, Q=> );
+R_TRIG_MoveRel		(CLK:= iCONTROL_bits.6, Q=> );
+R_TRIG_MoveAbs		(CLK:= iCONTROL_bits.7, Q=> );
+R_TRIG_Reset		(CLK:= iCONTROL_bits.14, Q=> );
+
+//Move register motor
+IF bErrorSetup OR bErrorStuck THEN			//bad setup or stuck motor
+	nMoveTime				:= 0;
+	bRegPlus				:= FALSE;		//no motor move allowed if this error condition present
+	bRegMinus				:= FALSE;
+	IF R_TRIG_Reset.Q THEN					//reset only clears motor stuck error
+		bErrorStuck	:= FALSE;
+	END_IF
+ELSE
+	IF NOT iSETUP_enFeedBackPositioing OR NOT iSETUP_enFeedBack THEN			//---- motor move requested with slope only OR NO pot feedback present-----
+		IF R_TRIG_MoveRel.Q THEN										//relative motor move requested
+			IF bMovingAbs 	THEN	nMoveTime	:= 0 ;	END_IF		
+												// Reset move time if going from a relative to an absolute move
+			nMoveTime		:= nMoveTime + (INT_TO_DINT(iCONTROL_reqPosition) *  10000) / INT_TO_DINT(iSETUP_Velocity);
+			bMovingRel		:= TRUE;									//set status bits
+			bMovingAbs		:= FALSE;
+			bIsCentering	:= FALSE;
+		END_IF
+		IF R_TRIG_MoveAbs.Q THEN										//absolute motor move requested
+			IF iSETUP_enFeedBack THEN									//if pot feedback
+											// only if possible to make absolute moves if pot feedback is available
+				nMoveTime		:= ((INT_TO_DINT(iCONTROL_reqPosition) - nActualPos) *  10000) / INT_TO_DINT(iSETUP_Velocity);
+				bMovingRel		:= FALSE;								//set status bits
+				bMovingAbs		:= TRUE;				//abs motor move with slope only and FB present
+				bIsCentering	:= FALSE;
+			END_IF
+		END_IF
+		IF R_TRIG_Centering.Q THEN										//centering motor move requested
+			IF iSETUP_enLimitSw THEN									//must have 2 limit switches
+				bIsCentering			:= TRUE;
+				bActivateCenteringSeq	:= TRUE;							//turn on center sequence here
+			ELSIF iSETUP_enFeedBack THEN								//or pot feedback is present
+				nMoveTime		:= ((0 - nActualPos) *  10000) / INT_TO_DINT(iSETUP_Velocity);
+				bMovingRel		:= FALSE;								//set status bits
+				bMovingAbs		:= FALSE;
+				bIsCentering	:= TRUE;				//centering allowed with POT FB only??????
+			END_IF
+		END_IF
+	ELSIF iSETUP_enFeedBackPositioing  THEN					//-----positioning based on pot feedback only------
+		IF R_TRIG_MoveRel.Q THEN								//relative motor move requested
+			IF bMovingAbs 	THEN	nMoveTime	:= 0 ;	END_IF		
+												// Reset move time if going from a relative to an absolute move
+			nMoveTime		:= nMoveTime + (INT_TO_DINT(iCONTROL_reqPosition) *  20000) / INT_TO_DINT(iSETUP_Velocity);
+			nPositioningReq	:= nActualPos	+ INT_TO_DINT(iCONTROL_reqPosition);		//set destination here
+			bMovingRel		:= TRUE;									//set status bits
+			bMovingAbs		:= FALSE;
+			bIsCentering	:= FALSE;
+		END_IF
+		IF R_TRIG_MoveAbs.Q THEN								//absolute motor move requested
+			IF iSETUP_enFeedBack THEN							
+											// only if possible to make absolute moves if feedback is available
+				nMoveTime		:= ((INT_TO_DINT(iCONTROL_reqPosition) - nActualPos) *  20000) / INT_TO_DINT(iSETUP_Velocity);
+				nPositioningReq	:= INT_TO_DINT(iCONTROL_reqPosition);					//set destination here
+				bMovingRel		:= FALSE;								//set status bits
+				bMovingAbs		:= TRUE;
+				bIsCentering	:= FALSE;
+			END_IF
+		END_IF
+		IF R_TRIG_Centering.Q THEN								//centering motor move requested
+			IF iSETUP_enLimitSw THEN							//must have 2 limit switches
+				bIsCentering			:= TRUE;
+				bActivateCenteringSeq	:= TRUE;					//turn on center sequence here
+			ELSIF iSETUP_enFeedBack THEN						//or pot feedback is present
+				nMoveTime		:= ((0 - nActualPos) *  20000) / INT_TO_DINT(iSETUP_Velocity);
+				bMovingRel		:= FALSE;								//set status bits
+				bMovingAbs		:= FALSE;
+				bIsCentering	:= TRUE;
+			END_IF
+		END_IF
+	END_IF
+END_IF
+
+//iCONTROL_bits.6;		// test start rel move
+//iCONTROL_bits.7;		// test start abs move
+//iCONTROL_reqPosition;
+
+// control register - commands to move motor engaged and move time is still allow motor to be on.
+IF nMoveTime > 0 THEN		//if move TIME positive, moving to plus limit
+	
+	nMoveTime		:= nMoveTime - nTaskTime;	//count DOWN the move time from last PLC cycle
+	bRegPlus		:= TRUE;				//motor moving in plus direction
+	bRegMinus		:= FALSE;				//clear minus direction and limit flags
+	bLimitMinus		:= FALSE;
+	IF iSETUP_enFeedBackPositioing AND NOT bIsCentering AND nActualPos >= nPositioningReq THEN	//if move with pot and not centering and position GT requested (past)
+		nMoveTime	:= 0 ;																	//stop move here
+	END_IF
+	IF iLimitSwPlus OR nActualPos >= iSETUP_MaxPos THEN		//if the plus limit switch is active or position is past the move position limit
+		nMoveTime	:= 0 ;						//move is done
+		bLimitPlus	:= TRUE;					//indicate plus limit reached
+	END_IF
+	
+	// check for stuck motor or wrong direction
+	IF iSETUP_enFeedBack THEN						//pot feedback present
+		IF nActualPos > nOldActualPos THEN			//check FB position has changed and move is correct direction
+			nStuckCounter	:=	0;						//not stuck
+			nOldActualPos	:= nActualPos;				//update old position
+		ELSE
+			nStuckCounter	:=	nStuckCounter	+ nTaskTime;	//maybe stuck, count how many cycles seen stuck
+			IF nStuckCounter >= (1000000 / LIMIT(10, iSETUP_Velocity, 1000))  THEN		//depend on slope value, if seen 1000 to 100000 PLC cycles before flag stuck
+				bErrorStuck	:= TRUE;
+			END_IF
+		END_IF
+	END_IF
+	
+ELSIF nMoveTime < 0 THEN		//if move TIME negative, moving to minus limit
+	
+	nMoveTime		:= nMoveTime + nTaskTime;	//count UP the move time from last PLC cycle
+	bRegPlus		:= FALSE;				//clear plus direction and limit flag
+	bRegMinus		:= TRUE;				//motor moving in minus direction
+	bLimitPlus		:= FALSE;
+	IF iSETUP_enFeedBackPositioing AND NOT bIsCentering AND nActualPos <= nPositioningReq THEN  //if move with pot and not centering and position LT requested (past)
+		nMoveTime	:= 0 ;																	//stop move here
+	END_IF
+	
+	IF iLimitSwMinus OR nActualPos <= iSETUP_MinPos THEN	//if the minus limit switch is active or position is past the move position limit
+		nMoveTime	:= 0 ;							//move is done
+		bLimitMinus	:= TRUE;						//indicate minus limit reached
+	END_IF
+	
+	// check for stuck motor or wrong direction
+	IF iSETUP_enFeedBack THEN						//pot feedback present
+		IF nActualPos < nOldActualPos THEN			//check FB position has changed and move is correct direction
+			nStuckCounter	:=	0;						//not stuck
+			nOldActualPos	:= nActualPos;				//update old position
+		ELSE
+			nStuckCounter	:=	nStuckCounter	+ nTaskTime;	//maybe stuck, count how many cycles seen stuck
+			IF nStuckCounter >= (1000000 / LIMIT(10, iSETUP_Velocity, 1000))  THEN		//depend on slope value, if seen 1000 to 100000 PLC cycles before flag stuck
+				bErrorStuck	:= TRUE;
+			END_IF
+		END_IF
+	END_IF
+	
+END_IF
+
+TON_CenteringTimout(IN:= nMoveTime = 0 AND NOT bActivateCenteringSeq , PT:= T#1S, Q=> , ET=> );		//centering sequence timer is here
+
+// reset bits and functions if runtime is out
+IF (nMoveTime = 0 OR ABS(nMoveTime) <  nTaskTime) 	//IF no more time to move motor (count is zero or LT PLC cycle time)
+OR iCONTROL_bits.8 									// or STOP MOTOR command is engaged
+THEN		
+	nMoveTime 		:= 0;						//zero motor move time
+	bMovingRel		:= FALSE;					//reset motor moving bits
+	bMovingAbs		:= FALSE;
+	bRegPlus		:= FALSE;					//reset direction bits
+	bRegMinus		:= FALSE;
+	nStuckCounter	:=	0; 						//not stuck (clear stuck counter)
+	nOldActualPos	:= nActualPos;				//update the old position
+	IF  iCONTROL_bits.8  THEN				//if STOP MOTOR command
+		bIsCentering			:= FALSE;		// no longer centering
+		bActivateCenteringSeq	:= FALSE;
+	END_IF
+	IF TON_CenteringTimout.Q THEN			//if centering timer is done
+		bIsCentering			:= FALSE;		//no longer centering
+		bActivateCenteringSeq	:= FALSE;
+	END_IF
+END_IF
+
+
+IF NOT iSETUP_InvertFB THEN				//check FB inversion setting
+	qRegisterPlus	:=	bRegPlus;			//update the motor direction OUTPUT booleans
+	qRegisterMinus	:=	bRegMinus;				//(not FB inverted)
+ELSE
+	qRegisterMinus	:=	bRegPlus;				//(FB is inverted)
+	qRegisterPlus	:=	bRegMinus;
+END_IF
+
+
+// status registers are updated here (OUTPUT)
+qSTATUS_Position	:= DINT_TO_INT(nActualPos);		//post the scaled actual position here to OUTPUT
+
+qSTATUS_bits.0		:= bRegPlus;				//motor in plus direction?
+qSTATUS_bits.1		:= bLimitPlus;				//has plus limit reached?
+qSTATUS_bits.2		:= bRegMinus;				//motor is minus direction?
+qSTATUS_bits.3		:= bLimitMinus;				//has minus limit reached?
+qSTATUS_bits.4		:= bIsCentering;			// is motor centering?
+qSTATUS_bits.5		:= FALSE;					//--not used--
+qSTATUS_bits.6		:= bMovingRel;				// motor moving relative?
+qSTATUS_bits.7		:= bMovingAbs;				// motor moving absolute?
+qSTATUS_bits.8		:= iCONTROL_bits.8;			// motor move stopped was requested?
+qSTATUS_bits.9		:= FALSE;					//--not used--
+qSTATUS_bits.10		:= FALSE;					//--not used--
+qSTATUS_bits.11		:= FALSE;					//--not used--
+qSTATUS_bits.12		:= FALSE;					//--not used--
+qSTATUS_bits.13		:= bErrorCenteringTimout;	// error - centering sequence timed out?
+qSTATUS_bits.14		:= bErrorStuck;				// error - motor was seen stuck too long?
+qSTATUS_bits.15		:= bErrorSetup;				// error - some setting was invalid?
+
+
+
+// Centering function if limit switches and not feedback
+IF stateCentre > 0 AND NOT bIsCentering THEN
+	stateCentre	:= 0 ;						//reset the state machine
+END_IF
+
+TON_CentreStep(IN:= , PT:= , Q=> , ET=> );		//centering step timer???? watch time in each state?
+
+CASE stateCentre	OF				// centering state machine case handling
+	
+	0:	// centering not active
+		IF 	bActivateCenteringSeq THEN
+			stateCentre := stateCentre	+ 1;	//next state
+			nCenteringTotalTime			:= 0 ;	//clear centering time
+		END_IF
+		TON_CentreStep.IN	:= FALSE;		//no state timer yet
+		
+	1:	// move to plus 
+		nMoveTime		:= ((nTotalRegisterLenght) *  20000) / INT_TO_DINT(iSETUP_Velocity);	//move time in plus direction, very generous to get to limit
+		stateCentre:= stateCentre + 1;															//next state
+	
+	2:	// wait for limit switch
+		IF nMoveTime = 0 AND NOT bLimitPlus THEN	//if move complete before limit is reached
+			stateCentre := 99	;					// goto timeout state if not limit and out of time
+		ELSIF nMoveTime = 0 THEN
+			stateCentre:= stateCentre + 1;			//next state only if out of  time
+		END_IF
+											// if plus limit detected, move time will be zeroed elsewhere
+	3:	// timout
+		TON_CentreStep.IN	:= TRUE;		//start state timer
+		TON_CentreStep.PT	:= T#500MS;		// wait for 500 ms
+		
+		IF TON_CentreStep.Q THEN			//if timer done
+			TON_CentreStep.IN	:= FALSE;	// turn off timer
+			stateCentre:= stateCentre + 1;	// next state
+		END_IF
+			
+	4:	// move to minus distance
+		nMoveTime		:= ((0-nTotalRegisterLenght) *  20000) / INT_TO_DINT(iSETUP_Velocity);	//move time in minus direction, very generous to get to limit
+		stateCentre:= stateCentre + 1;															//next state
+			
+	5:	// wait for limit, count distance
+		IF nMoveTime = 0 AND NOT bLimitMinus THEN	//if move complete before limit is reached 
+			stateCentre := 99	;				// goto timeout state if not limit and out of time
+		ELSIF nMoveTime = 0 THEN
+			stateCentre:= stateCentre + 1;		// next state only if out of time
+		END_IF
+											// if minus limit detected, move time will be zeroed elsewhere
+		nCenteringTotalTime		:= nCenteringTotalTime + nTaskTime;		//keep updating centering time for distance traveled from plus to minus switches
+		
+	6:	// timout
+		TON_CentreStep.IN	:= TRUE;		//start state timer
+		TON_CentreStep.PT	:= T#500MS;		// wait for 500 ms
+		
+		IF TON_CentreStep.Q THEN			//if timer done
+			TON_CentreStep.IN	:= FALSE;	// turn off timer
+			stateCentre:= stateCentre + 1;	// next state
+		END_IF		
+	
+	7:	// move to Mid pos
+		nMoveTime		:= nCenteringTotalTime / 2;	//move back to middle in plus direction, according to time 
+		stateCentre:= stateCentre + 1;				// next state
+	
+	8:	// wait for done 
+		IF nMoveTime = 0 THEN						//wait until move back to center is done
+			bActivateCenteringSeq	:= FALSE;		//cleanup flags
+			bIsCentering			:= FALSE;		
+			stateCentre				:= 0 ;			//state back to zero, we are done with centering sequence here
+		END_IF
+	
+	99:
+		bErrorCenteringTimout	:= TRUE;		//error flag is set, keep the state for reset command
+		IF R_TRIG_Reset.Q THEN					// wait for RESET command, come back here 
+			bErrorCenteringTimout	:= FALSE;	// clear the centering error flag
+			bIsCentering			:= FALSE;	// no longer centering
+			bActivateCenteringSeq	:= FALSE;	// cleanup flags
+			stateCentre				:= 0;		//state back to zero, we are done with centering RECOVERY here
+		END_IF
+		
+END_CASE
+
+//------end of AVT_ REGISTER --------]]></ST>
+    </Implementation>
+    <LineIds Name="FB_AVT_Register">
+      <LineId Id="3" Count="4" />
+      <LineId Id="554" Count="0" />
+      <LineId Id="8" Count="6" />
+      <LineId Id="659" Count="0" />
+      <LineId Id="15" Count="1" />
+      <LineId Id="658" Count="0" />
+      <LineId Id="17" Count="39" />
+      <LineId Id="765" Count="3" />
+      <LineId Id="771" Count="2" />
+      <LineId Id="770" Count="0" />
+      <LineId Id="776" Count="2" />
+      <LineId Id="775" Count="0" />
+      <LineId Id="57" Count="0" />
+      <LineId Id="378" Count="0" />
+      <LineId Id="58" Count="6" />
+      <LineId Id="379" Count="0" />
+      <LineId Id="65" Count="19" />
+      <LineId Id="380" Count="0" />
+      <LineId Id="85" Count="7" />
+      <LineId Id="381" Count="0" />
+      <LineId Id="93" Count="209" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

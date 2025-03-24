@@ -1,0 +1,81 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.6">
+  <POU Name="FLogging" Id="{d7bd57ae-2c0e-4ed7-a69b-3257f3f83fbb}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION FLogging : BOOL
+VAR_INPUT
+
+///SDOC/////////////////////////////////////////////////////////////////////////
+//
+//  FLogging.TcPOU      - Function - PLC state logging - AVT PLC 
+//
+//  Author:         Mark Colvin                        Date: Jan 18, 2018 
+//
+//	Beckhoff TC3 Structured Text for CX50x0 PLC
+//
+//	includes features:
+//		10 inker enables
+//		Ink ramping
+//		Water ramping
+//		Ink Surge
+//		Water Flood
+//		Ink Ducting (Hold Off)
+//		Ink Wash Up 
+//		Ink Function Control (Off/manual/auto)
+//		water Function Control (off/manual/auto)
+//		Inker positioner with feedback
+//		Water positioner with feedback
+//		Inker Analog Control
+//		water Analog Control
+//		Inker Positioner output cancel
+//		Water Positioner output cancel
+///////////////////////////////////////////////////////////////////////SDOCEND//
+//inputs to this function
+
+	b_enabled :BOOL;	//enabled - enable or disable logging
+	w_state	:WORD;	//state to be logged
+END_VAR
+VAR
+
+	w_count		:WORD;	//temp
+	w_max_count	:WORD;	//temp
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[(************************************************************************************************
+ *
+ *   FUNCTION 	:FLogging
+ *
+ *   Author		:	Mark Colvin
+ *
+ *   Description:	Write logging of states for system log text file 'tcsyslog' in My Device folder of PLC; ADSLOG_MSGTYPE_LOG
+ *				(or the IDE output window; ADSLOG_MSGTYPE_HINT)
+ *
+ *   Parameters	:	enabled - enable or disable logging
+ *					state to be logged
+ *
+ *   Returns	:	void	
+ *
+ *   History	:   18-Jan-18, MarkC Created
+ *
+************************************************************************************************)
+w_max_count := 10000;  // this count does not seem to work, control logging externally with logging enable
+
+if((b_enabled = TRUE) AND (w_count < w_max_count)) THEN
+	ADSLOGDINT( msgCtrlMask := ADSLOG_MSGTYPE_LOG OR ADSLOG_MSGTYPE_HINT, msgFmtStr := 'Inker Posit State: %d', dintArg:=  w_state);
+	w_count := w_count +1;
+END_IF 
+if( b_enabled = FALSE) THEN
+	w_count := 0;
+END_IF
+
+FLogging:= FALSE;
+
+RETURN;]]></ST>
+    </Implementation>
+    <LineIds Name="FLogging">
+      <LineId Id="3" Count="23" />
+      <LineId Id="2" Count="0" />
+      <LineId Id="28" Count="4" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

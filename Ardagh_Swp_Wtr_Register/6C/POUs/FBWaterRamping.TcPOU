@@ -1,0 +1,152 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.10">
+  <POU Name="FBWaterRamping" Id="{e47940c5-daf8-4f74-923e-12ba2a90718e}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FBWaterRamping
+///SDOC/////////////////////////////////////////////////////////////////////////
+//
+//  FBWaterRamping.TcPOU      - Function Block - Water Ramping - adjustments to Water trim based on press speed - AVT PLC 
+//						Version 2
+//  Author:         Mark Colvin                        Date: Apr 20, 2018
+//
+//	Beckhoff TC3 Structured Text for CX50x0 PLC
+//
+//	includes features:
+//		10 inker enables
+//		Ink ramping
+//		Water ramping
+//		Ink Surge
+//		Water Flood
+//		Ink Ducting (Hold Off)
+//		Ink Wash Up 
+//		Ink Function Control (Off/manual/auto)
+//		water Function Control (off/manual/auto)
+//		Inker positioner with feedback
+//		Water positioner with feedback
+//		Inker Analog Control
+//		water Analog Control
+//		Inker Positioner output cancel
+//		Water Positioner output cancel
+///////////////////////////////////////////////////////////////////////SDOCEND//
+VAR_INPUT
+END_VAR
+VAR_OUTPUT
+END_VAR
+VAR
+	// === LOCAL DATA === NOT saved over power cycles
+
+	r_WaterTrim			:ARRAY[0..GVL.w_MAXFOUNTAINS] OF REAL;	//temp real for current water trim value
+	r_WaterTrimInfluence	:ARRAY[0..GVL.w_MAXFOUNTAINS] OF REAL;	//temp real for water trim influence value
+	r_WaterTrimFactor		:ARRAY[0..GVL.w_MAXFOUNTAINS] OF REAL;	//temp real for water trim factor value
+	w_WaterTrim			:ARRAY[0..GVL.w_MAXFOUNTAINS] OF WORD;	//temp word for current water trim value
+	
+	w_last_speed_zone		:WORD;		//temp for LAST speed zone index
+	w_speed_index			:WORD;		//temp final speed zone index to use
+	Index				:WORD;		// temp index loop for fountains
+	Index_offset			:WORD;								//index offset to runtime data for fountains 7 to 10; 0 or 220
+	Index1				:WORD;		// temp index loop for speed zone to use
+	
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[(************************************************************************************************
+ *
+ *   FUNCTION BLOCK	:FBWaterRamping
+ *
+ *   Author		:	Gary Stefancik
+ *
+ *   Description:	Perform Water Ramping  Change Water trim values based on configuration data and trim adjust values based on press speed.
+ *
+ *   Parameters	:	void
+ *
+ *   Returns	:	void	
+ *
+ *   History	:   20-Apr-18	MarkC 	Reworked with new 2018 formula for ramping adjustments.
+ *
+***************************************************************************************************)
+w_last_speed_zone := GVL.mb_Output_Registers[GVL.RAMPINGSPEEDDIVISIONS] -1;
+IF (GVL.mb_Output_Coils[GVL.ENABLEFULLINIT] = FALSE) AND (GVL.mb_Output_Coils[GVL.ENABLERAMPINIT] = FALSE)THEN		//do not process while initializing PLC or ramping curves
+	FOR Index := 0 TO 5 DO   //(GVL.w_MAXFOUNTAINS) DO		//normal operations - loop ALL the configured fountains
+		//Index :=0;
+		Index_offset := 0;		//ftns 1 to 6, WORDRUNTIME only
+		IF( Index > 5 )THEN
+			Index_offset := GVL.SWPWTR_7_10_FTN_OFFSET;	//ftns 7 to 10, WORDRUNTIME only
+		END_IF	
+		IF ((GVL.mb_Output_Coils[GVL.ENABLEFOUNTAIN + Index] = TRUE) AND (GVL.mb_Output_Coils[GVL.WATERRAMPINGENABLED]) AND
+			(GVL.b_FloodOn[Index]=FALSE)) THEN  // If Fountain enabled and water ramping enabled and not flood
+			w_WaterTrim[Index] := GVL.mb_Output_Registers[GVL.WATERTRIM + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]; //current Water trim to temp
+			r_WaterTrim[Index]:= 		WORD_TO_REAL(w_WaterTrim[Index]) ;  //current Water trim value, convert to float temp
+			IF ((GVL.mb_Output_Registers[GVL.WATERFUNCTSETTING + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] = GVL.AUTO_FUNCTION)) THEN// Water  function set to AUTO
+					// Test current press speed for proper speed index.
+					// Max 20 values, 19 ranges, each RampingSpeedFPM value is the min for that range.  last value is the max speed			
+				FOR Index1:= 0 TO w_last_speed_zone DO  
+					IF ((GVL.mb_Output_Registers[GVL.PRESSSPEEDFPM] >= GVL.mb_Output_Registers[GVL.w_RAMPINGSPEEDFPM + Index1]) AND  
+						(GVL.mb_Output_Registers[GVL.PRESSSPEEDFPM] <= GVL.mb_Output_Registers[GVL.w_RAMPINGSPEEDFPM + Index1 + 1])) THEN  
+							// Found proper index for the curve adjust here					
+						IF (GVL.mb_Output_Registers[GVL.PRESSSPEEDFPM] >= GVL.mb_Output_Registers[GVL.w_RAMPINGSPEEDFPM + w_last_speed_zone]) THEN 
+								// In case current press speed is greater than Max Press Speed
+							w_speed_index := w_last_speed_zone;
+						ELSE
+							w_speed_index := Index1;
+						END_IF
+					END_IF
+				END_FOR
+				r_WaterTrimInfluence[Index]:= 	WORD_TO_REAL(GVL.mb_Output_Registers[GVL.WATERTRIMINFLUENCE]); 		//configured trim influence setting
+				r_WaterTrimFactor[Index]:= 	(r_WaterTrim[Index] - 50.0) / (50.0 / r_WaterTrimInfluence[Index]);				//calc the trim factor
+						// Motor Output %        = User Curve[ftn, speed] +                    Water Trim Factor(from current trim) +     Water Master Factor
+				GVL.w_WaterRampTrimAdjusted[Index] :=   REAL_TO_WORD(INT_TO_REAL(GVL.w_WaterRampTrimAdjust[Index,w_speed_index ]) + r_WaterTrimFactor[Index] + GVL.r_WaterMasterFactor);
+				//apply clamps
+				IF GVL.w_WaterRampTrimAdjusted[Index] < GVL.mb_Output_Registers[GVL.WTRMOTORCLAMPMIN] THEN
+					GVL.w_WaterRampTrimAdjusted[Index] := GVL.mb_Output_Registers[GVL.WTRMOTORCLAMPMIN]; 
+				END_IF
+				IF GVL.w_WaterRampTrimAdjusted[Index] > GVL.mb_Output_Registers[GVL.WTRMOTORCLAMPMAX] THEN
+					GVL.w_WaterRampTrimAdjusted[Index] := GVL.mb_Output_Registers[GVL.WTRMOTORCLAMPMAX]; 
+				END_IF
+				//apply to the current water trim value, after validate min and max trim values
+				IF( (GVL.w_WaterRampTrimAdjusted[Index] < GVL.mb_Output_Registers[GVL.MINWATERTRIM]) OR (GVL.w_WaterRampTrimAdjusted[Index] > GVL.mb_Output_Registers[GVL.MAXWATERTRIM])) THEN
+					//bad water trim calc here
+					GVL.w_WaterRampTrimAdjusted[Index] :=  GVL.w_LastWaterTrim[Index] ;
+				ELSE	
+//					GVL.mb_Output_Registers[GVL.WATERTRIM + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] :=  GVL.w_WaterRampTrimAdjusted[Index] ;
+//					GVL.mb_Output_Registers[GVL.WATERTRIMONPRESS + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] := 101; //make onpress invalid, force update
+					IF (GVL.w_WaterRampTrimAdjusted[Index] <> GVL.mb_Output_Registers[GVL.WATERTRIMONPRESS + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]) THEN
+						GVL.mb_Output_Coils[GVL.WtrControlRUN +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := TRUE;		// set trim & force if different
+					END_IF	
+//					GVL.mb_Output_Coils[GVL.Water_RUNNING +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := TRUE;  			//  changing the water value now
+				END_IF
+			END_IF			// if water function is auto
+		END_IF			//ftn enabled, ramping enabled, not flood
+	END_FOR		//ftn loop
+END_IF // not full init nor ramping init
+]]></ST>
+    </Implementation>
+    <LineIds Name="FBWaterRamping">
+      <LineId Id="1423" Count="17" />
+      <LineId Id="1513" Count="0" />
+      <LineId Id="1441" Count="0" />
+      <LineId Id="1687" Count="0" />
+      <LineId Id="1623" Count="1" />
+      <LineId Id="1442" Count="0" />
+      <LineId Id="1444" Count="14" />
+      <LineId Id="1460" Count="0" />
+      <LineId Id="1569" Count="1" />
+      <LineId Id="1574" Count="0" />
+      <LineId Id="1461" Count="3" />
+      <LineId Id="1628" Count="2" />
+      <LineId Id="1634" Count="2" />
+      <LineId Id="1627" Count="0" />
+      <LineId Id="1563" Count="1" />
+      <LineId Id="1626" Count="0" />
+      <LineId Id="1566" Count="0" />
+      <LineId Id="1465" Count="0" />
+      <LineId Id="1567" Count="0" />
+      <LineId Id="1779" Count="0" />
+      <LineId Id="1685" Count="0" />
+      <LineId Id="1780" Count="0" />
+      <LineId Id="1733" Count="0" />
+      <LineId Id="1565" Count="0" />
+      <LineId Id="1467" Count="0" />
+      <LineId Id="67" Count="2" />
+      <LineId Id="2" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

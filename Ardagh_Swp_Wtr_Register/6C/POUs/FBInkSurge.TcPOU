@@ -1,0 +1,154 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.10">
+  <POU Name="FBInkSurge" Id="{baea61da-a3bd-48a3-84fb-2169eb4c46dc}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FBInkSurge
+VAR_INPUT
+END_VAR
+VAR_OUTPUT
+END_VAR
+VAR
+	// === LOCAL DATA === NOT saved over power cycles
+	CountDownTON			:ARRAY[0..GVL.w_MAXFOUNTAINS] OF TON;
+	Index				:WORD:= 0;
+	Index_offset		:WORD;								//index offset to runtime data for fountains 7 to 10; 0 or 220
+	InkSurgeTON			:ARRAY[0..GVL.w_MAXFOUNTAINS] OF TON;
+	SurgeTimeValue		:ARRAY[0..GVL.w_MAXFOUNTAINS] OF TIME;
+	TempSurgeTime			:TIME;
+	s_CountDownTime		:ARRAY[0..GVL.w_MAXFOUNTAINS] OF STRING[5];	// used to 'display' (post) the countdown time
+	
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[(************************************************************************************************
+ *
+ *   FUNCTION BLOCK	:FBInkSurge
+ *
+ *   Author		:	Gary Stefancik
+ *
+ *   Description:	Perform Ink Surge.  Start/stop ink surge motors for a user defined period of time while in auto mode (ramping) 
+ *
+ *   Parameters	:	void
+ *
+ *   Returns	:	void	
+ *
+ *   History	:   29-Oct-17, GaryS Created
+ *					14-Nov-17	GaryS	Multiple changes for Ardagh, WI 143332
+ *				12-Dec-17	Mark C Removed the magic number with macros WI 143332
+ *
+***************************************************************************************************)
+//Note: no changes in ink trim values during ink surge, only activate HW output
+
+FOR Index:= 0 TO (GVL.w_MAXFOUNTAINS)  DO 
+	//Index := 5;  //debug a single fountain, one at a time, 0 to max-1
+	Index_offset := 0;		//ftns 1 to 6, WORDRUNTIME only
+	IF( Index > 5 )THEN
+		Index_offset := GVL.SWPWTR_7_10_FTN_OFFSET;	//ftns 7 to 10, WORDRUNTIME only
+	END_IF	
+
+	IF ((GVL.mb_Output_Coils[GVL.ENABLEFOUNTAIN + Index] = TRUE) AND
+		(GVL.mb_Output_Coils[GVL.ENABLEINKSURGE] = TRUE))	THEN  // Enabled Fountain and Enabled Surge feature
+		// Get time value from MB
+		TempSurgeTime:= ( GVL.mb_Output_Registers[GVL.INKSURGETIME + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] * T#1000MS); 	// Get InkSurgeTimeSet from MB
+		// Process new value if not zero 
+		IF (TempSurgeTime > T#0MS)  THEN
+			IF ((InkSurgeTON[Index].IN = TRUE) OR  										// Surge Timer already on
+			(GVL.mb_Output_Coils[GVL.INKWASHUP +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] = TRUE)) THEN  //  OR Wash-up is on
+				TempSurgeTime:=  T#0MS;  							// If surge is already on, then no new time accepted
+				GVL.mb_Output_Registers[GVL.INKSURGETIME + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]:= 0; // InkSurgeTimeSet reset
+			ELSE  						// Initialize flood time 
+								// Preserve original trim value, Note needed when impression on/min speed is lost
+				SurgeTimeValue[Index]:= TempSurgeTime; 
+				TempSurgeTime:= T#0MS;  						// reset
+				GVL.mb_Output_Registers[GVL.INKSURGETIME + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]:= 0; // InkSurgeTimeSet reset
+				IF (SurgeTimeValue[Index] > GVL.mb_Output_Registers[GVL.MAXINKSURGETIME] * T#1000MS) THEN // If the MB time is greater than max
+					SurgeTimeValue[Index]:= GVL.mb_Output_Registers[GVL.MAXINKSURGETIME] * T#1000MS;
+				END_IF
+			END_IF
+		END_IF
+		IF (GVL.mb_Output_Registers[GVL.PRESSSPEEDFPM]  = 0) AND (GVL.b_SurgeOn[Index] = TRUE)THEN //  below min press speed  (stopped) and surge is ON
+				GVL.mb_Output_Coils[GVL.CANCELINKSURGE + (Index * GVL.BOOLRUNTIMEGROUPSIZE)] := TRUE;
+		END_IF
+		// SHUTDOWN
+		IF ((InkSurgeTON[Index].Q  = TRUE) OR 															// Timer is finished or
+			(GVL.mb_Output_Coils[GVL.INKWASHUP +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] = TRUE) OR  		// Washup is on or
+			(GVL.mb_Output_Coils[GVL.CANCELINKSURGE + (Index * GVL.BOOLRUNTIMEGROUPSIZE)] = TRUE)) THEN // cancel flood is TRUE
+				InkSurgeTON[Index].IN:= FALSE; 									// Reset timer for next run
+				GVL.b_SurgeOn[Index]:= FALSE; 									// Inform InkSweep Surge is FALSE to set to Normal Trim
+//					GVL.mb_Output_Registers[GVL.SWEEPTRIM + (Index * GVL.WORDRUNTIMEGROUPSIZE)]:= GVL.w_PreviousInkTrimSurge[Index]; 
+							//  original trim value ... Note needed when impresson/minspeed is lost GKS seq to 15 00000000000000  ?????
+				GVL.mb_Output_Registers[GVL.INKSURGECOUNTDOWN + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]:= 0; // Set CountDown Time to 0 in MB  
+				GVL_IO.InkSurge[Index]:= FALSE;  														// Turn off surge IO
+				GVL.mb_Output_Coils[GVL.CANCELINKSURGE + (Index * GVL.BOOLRUNTIMEGROUPSIZE)]:= FALSE;  // Reset cancel water flood	
+		END_IF 	
+
+		// STARTUP
+		// If Timer is off and InkSurgeTime is > 0 Then start timer
+		IF ((InkSurgeTON[Index].IN = FALSE) AND  		// Timer is off
+			(SurgeTimeValue[Index] > T#0MS)) THEN // A value has come in from the MB
+//				GVL.w_PreviousInkTrimSurge[Index]:= GVL.mb_Output_Registers[GVL.SWEEPTRIM + (Index * GVL.WORDRUNTIMEGROUPSIZE)]; 
+				InkSurgeTON[Index].PT:= SurgeTimeValue[Index]; // Set PT to  Flood Time Value
+				SurgeTimeValue[Index]:= T#0MS; 			// Set Surge Time Value to T#0ms (reset)
+				InkSurgeTON[Index].IN:= TRUE;			// Turn on timer
+				GVL.b_SurgeOn[Index]:= TRUE; 			// Inform InkSweep Surge is TRUE to set Max Trim
+				GVL_IO.InkSurge[Index]:= TRUE;  		// Turn on surge IO	
+		END_IF
+	
+		// Execute Surge Timer
+		InkSurgeTON[INDEX](IN:= , PT:= , Q=> , ET=> );// Run TON if IN is TRUE, set Q TRUE when finished
+		
+		// Process Count Down Timer
+		IF ((CountDownTON[Index].Q = TRUE) AND
+			(InkSurgeTON[Index].IN = TRUE)) THEN
+
+			s_CountDownTime[Index]:= TIME_TO_STRING(InkSurgeTON[Index].PT - InkSurgeTON[Index].ET);
+			s_CountDownTime[Index]:= Delete(s_CountDownTime[Index],2,1);
+			CountDownTON[Index].IN:= TRUE;	
+		
+			// extract count down time and put into Modbus
+			IF (FIND(s_CountDownTime[Index], 's') = 0) THEN  // if in 3 digit milliseconds 
+				GVL.mb_Output_Registers[GVL.INKSURGECOUNTDOWN + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]:= 0; // Set SurgeCountdown to 0 
+			ELSIF (FIND(s_CountDownTime[Index], 'm') <> 0) THEN // if in 2 or 1 digit milliseconds 
+				GVL.mb_Output_Registers[GVL.INKSURGECOUNTDOWN + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]:= 0; // Set SurgeCountdown to 0 
+			ELSIF (FIND(s_CountDownTime[Index], 's') = 2) THEN  // time is 1 digit of seconds
+				s_CountDownTime[Index]:= Delete(s_CountDownTime[Index], 4, 2);
+				GVL.mb_Output_Registers[GVL.INKSURGECOUNTDOWN+ Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]:= STRING_TO_WORD(s_CountDownTime[Index]);   
+			ELSIF (FIND(s_CountDownTime[Index], 's') = 3) THEN // time is in 2 digits of seconds
+				s_CountDownTime[Index]:= Delete(s_CountDownTime[Index], 1, 3);
+				GVL.mb_Output_Registers[GVL.INKSURGECOUNTDOWN + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]:= STRING_TO_WORD(s_CountDownTime[Index]);
+			END_IF
+		END_IF
+		
+		// Execute CountDown Timer
+		IF (InkSurgeTON[Index].IN = TRUE) THEN
+			CountDownTON[Index].IN:= TRUE;
+			CountDownTON[Index].PT:= T#1S;
+			CountDownTON[Index](IN:= , PT:= , Q=> , ET=> );
+		END_IF
+	END_IF  // Fountain and surge enabled
+END_FOR // each fountain
+]]></ST>
+    </Implementation>
+    <LineIds Name="FBInkSurge">
+      <LineId Id="821" Count="19" />
+      <LineId Id="857" Count="0" />
+      <LineId Id="949" Count="1" />
+      <LineId Id="859" Count="5" />
+      <LineId Id="868" Count="2" />
+      <LineId Id="872" Count="9" />
+      <LineId Id="968" Count="1" />
+      <LineId Id="882" Count="0" />
+      <LineId Id="885" Count="1" />
+      <LineId Id="890" Count="6" />
+      <LineId Id="898" Count="0" />
+      <LineId Id="900" Count="0" />
+      <LineId Id="948" Count="0" />
+      <LineId Id="902" Count="2" />
+      <LineId Id="906" Count="0" />
+      <LineId Id="951" Count="0" />
+      <LineId Id="908" Count="39" />
+      <LineId Id="9" Count="0" />
+      <LineId Id="106" Count="3" />
+      <LineId Id="2" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

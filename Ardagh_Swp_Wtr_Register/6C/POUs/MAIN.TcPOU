@@ -1,0 +1,491 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.10">
+  <POU Name="MAIN" Id="{41910415-2467-48b6-8e7b-a2d7744011c7}" SpecialFunc="None">
+    <Declaration><![CDATA[PROGRAM MAIN
+VAR
+///SDOC/////////////////////////////////////////////////////////////////////////
+//
+//  MAIN.TcPOU      - Main PLC top level loop - AVT PLC 
+//
+//  Author:         Mark Colvin                         Date: Nov 1, 2018
+//
+//	Beckhoff TC3 Structured Text for CX50x0 PLC
+//
+//	includes features:
+//		10 inker enables
+//		Ink ramping
+//		Water ramping
+//		Ink Surge
+//		Water Flood
+//		Ink Ducting (Hold Off)
+//		Ink Wash Up 
+//		Ink Function Control (Off/manual/auto)
+//		water Function Control (off/manual/auto)
+//		Inker positioner with feedback
+//		Water positioner with feedback
+//		Inker Analog Control
+//		water Analog Control
+//		Inker Positioner output cancel
+//		Water Positioner output cancel
+//		Error logging
+//		Analog Calibration - Real-time Support
+//		Plate register support
+///////////////////////////////////////////////////////////////////////SDOCEND//
+	// === LOCAL DATA ===
+	//-- instance---		--- POU file name ---
+	FB_InitializeProgram	:FBInitializeProgram;
+	FB_InitializeRamping	:FBInitializeRamping;	
+	FB_InitializeRegister   :FBInitializeRegister;
+	FB_InkRamping 		:FBInkRamping;
+ 	FB_InkSurge			:FBInkSurge;
+	FB_WaterFlood			:FBWaterFlood;
+	FB_WaterRamping		:FBWaterRamping;
+	FB_SetDuctor			:FBSetDuctor;
+	FB_InkWashUp			:FBInkWashUp;
+	FB_InkSweep_FB		:FBInkSweep_FB;
+	FB_InkSweep_Out		:FBInkSweep_Output;
+	FB_InkSweep_Time		:FBInkSweep_Time;
+	FB_WaterSweep_FB		:FBWaterSweep_FB;
+	FB_WaterSweep_Out		:FBWaterSweep_Output;
+//	FB_waterSweep_Time	:FBWaterSweep_Time;
+	FB_RealtimeSupport	:FBRealtimeSupport;
+	FB_InkWaterOFF		:FBInkWaterOFF;
+	FB_AVTReg_5C		:FB_AVT_Register;
+	FB_FunctionChanged	:FB_FunctionChange;
+//	Beckhoff system library - I/O - Tc2_SUPS
+//	fbUPS				:FB_CXSimpleUps;
+	eState				:E_S_UPS_State;					
+	
+	FB_AVTReg_arr		:ARRAY[0..9, 0..GVL.w_MAXREGISTERMOTORS ] OF FB_AVT_Register;  //only 10 ftns (circ & lat) for now, 20 motors total
+	b_RegisterEnable	:ARRAY[0..GVL.w_MAXFOUNTAINS] OF BOOL; 	//disable this fountain's register if no pot and no limit switches
+	Index					:WORD;								// temp word for loop fountain index
+//	Index_offset			:WORD;								//index offset to runtime data for fountains 7 to 10; 0 or 220
+	iMotor				:WORD;			//temp loop index
+
+	iLimitPlus			:BOOL;			//register temps
+	iLimitMinus			:BOOL;
+	iPotFB				:INT;
+	b_Plus_Out			:BOOL;
+	b_Minus_Out			:BOOL;
+	i_temp_position		:INT;
+	i_temp_bools		:INT;
+	w_temp_index		:WORD;	//special offset for inker 6+ addressing for register runtime
+	Index2				:WORD;
+	i_PressSpeed			:INT;
+	r_TicksPerFoot		:REAL;
+	r_PressSpeed			:REAL;
+	d_PressSpeed			:DINT;
+	TON_wait			:TON;
+	b_SpeedInterlock	:BOOL;
+END_VAR
+
+VAR CONSTANT
+	
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[
+// set PLC image version - Sept 24, 2020
+GVL.mb_Output_Registers[GVL.PLCVERSIONNUMBER]:= 5;   // Major revision number
+GVL.mb_Output_Registers[GVL.PLCMINORREVISION]:= 0;  // Minor revision number x 100
+
+//  AVT PLC HISTORY
+//  0.40	27-OCT-17	GaryS	Added version info to Modbus	
+// 	0.41	27-OCT-17	GaryS	Changed r_InkMasterInfluence  to r_InkMasterSetting in Ink/water motor output ramping equation
+//  0.42	29-OCT-17	GaryS	Added headers information
+//	0.43	31-OCT-17	GaryS	Rewrote FBInitializeRamping, Preserve ductor settings in wash-up
+//	0.44	31-OCT-17	GaryS	Published Impression to index 23 and 24 as stopgap.  Set ductor to 0 during wash-up
+//  1.00    01-NOV-17	GaryS	Promoted 0.44 to version 1.0
+//	1.01	06-NOV-17	GaryS	Added motor stop control for bad ink feedback, surge allowed in manual mode
+//	1.02	14-NOV-17	GaryS	Added error processing, Ardagh ink and water changes, removed bad ink feedback error WI 143332
+//  2.00    05-DEC-17   MarkC   PCU replacement - sweep only inker positioners - WI 145673
+//								PLC Cancel feature - ink/water output shut-down
+//								Ink/water trim real-time positioners updates to MODBUS
+//								10 fountain configuration
+//								Enables for sweep/water control, I/W function, I/W cancel feature
+//								restore error code handling for bad feedback
+//	2.05		07-Feb-18  MarkC	New Function Block for inker positioner code from DCOS
+//	2.08     15-Feb-18	MarkC added functionality for Ardagh, clean-up positioner code
+//	4.18	18-Sept-19  MarkC added extra MODBUS for 10 fountains sweep/water/register
+//
+/////////////////////////////////////////////////////////////////////////////
+//  
+//  Main		PLC top level loop
+//
+//  Author:	GaryS
+//
+//	Main History
+//	27-OCT-17	GaryS	Created
+//	31-OCT-17	GaryS	Published Impression to index 23 and 24 as stopgap. Set ductor to zero as required during wash.
+//	14-NOV-17	GaryS	Added error processing, Ardagh ink and water changes WI 143332
+//	27-Mar-2018	MarkC	Installed PLC vers 2.21 at IWCO, Hamburg, PA on Systems 7634 and 7635
+//	4-Apr-18		MarkC	Clean-up improvements from IWCO install - PLC vers 2.22 - WI 160641
+//  12-Nov-2018 MarkC Added Register operation code
+//	20-Mar 2020 MarkC  Added power failure detection with FB_S_UPS
+// 
+//***********************************************************************************************
+//*******
+//test for PLC power failure
+//*******
+IF eState = eSUPS_PowerFailure THEN
+	GVL.b_Power_Failure_Detected := TRUE;  //set the power failure flag for the PLC init procedure
+	WHILE GVL.b_Power_Failure_Detected = TRUE DO		//wait here until PLC stops
+		GVL.mb_Output_Coils[GVL.ENABLEFULLINIT] := TRUE;
+	END_WHILE
+END_IF
+
+//********************************************************************************
+// PLC FULL INITIALIZATION - if MODBUS boolean set from , perform this code
+//********************************************************************************
+IF (GVL.mb_Output_Coils[GVL.ENABLEFULLINIT] = TRUE) OR (GVL.b_Power_Failure_Detected = TRUE) THEN
+
+	GVL.mb_Output_Registers[GVL.w_STATE] := 0;
+//	TON_wait(IN:=TRUE, PT:=T#5S, Q=> , ET=>);
+	WHILE GVL.mb_Output_Registers[GVL.w_STATE] < 5000 DO // do this init many times ...
+		FB_InitializeProgram();		
+	END_WHILE
+	GVL.mb_Output_Registers[GVL.REALTIME_DATA_SELECTION] := 0; //clear the calibration tool data selection
+	GVL.mb_Output_Coils[GVL.ENABLEFULLINIT] := FALSE;		//done with full initialization of PLC config	
+	GVL.b_Power_Failure_Detected := FALSE; 					//reset the power failure flag
+END_IF
+
+//********************************************************************************
+// PLC RAMPING CURVE INITIALIZATION - if MODBUS boolean set, perform this code
+//********************************************************************************
+IF (GVL.mb_Output_Coils[GVL.ENABLERAMPINIT] = TRUE) THEN
+	FB_InitializeRamping();
+END_IF	
+
+//********************************************************************************
+// PLC Register INITIALIZATION - if MODBUS boolean set, perform this code
+//********************************************************************************
+IF (GVL.mb_Output_Coils[GVL.ENABLEREGISTERINIT] = TRUE) THEN
+	FB_InitializeRegister();
+END_IF	
+
+//********************************************************************************
+// Copy 'IMPRESSION ON' BOOLEAN (HW input) to MODBUS COILS boolean for slave use
+//********************************************************************************
+// This HW input usually tied to EL1808 TB
+IF (GVL_IO.b_Impression = TRUE) THEN
+	 GVL.mb_Output_Coils[GVL.IMPRESSIONON]:= TRUE;
+	 GVL.mb_Output_Coils[GVL.IMPRESSIONON2]:= TRUE;
+END_IF
+IF (GVL_IO.b_Impression = FALSE) THEN
+	GVL.mb_Output_Coils[GVL.IMPRESSIONON]:= FALSE;
+	GVL.mb_Output_Coils[GVL.IMPRESSIONON2]:= FALSE;
+END_IF
+
+//**************************************
+// GET AND SET PRESS SPEED
+// Skip encoder/ voltage for now.  will need to add to MB later
+
+IF (GVL.b_DINTInput) THEN 			
+	// Calculate press speed in feet per minute using voltage.  HW Input is a DINT (24bits of 32bits), output written is an WORD
+	// usually from EL3751 terminal
+	IF (GVL.d_TicksPerFoot > 0) THEN 
+		IF (DINT_TO_REAL(GVL_IO.d_PressSpeed) < GVL.r_PressSpeedDintMin) THEN
+			 d_PressSpeed:= REAL_TO_DINT(GVL.r_PressSpeedDintMin);
+		ELSE
+			 d_PressSpeed:= GVL_IO.d_PressSpeed;
+		END_IF
+		r_PressSpeed:= DINT_TO_REAL(d_PressSpeed);
+		r_TicksPerFoot:= DINT_TO_REAL(GVL.d_TicksPerFoot);
+		GVL.mb_Output_Registers[GVL.PRESSSPEEDFPM]:=  REAL_TO_WORD((r_PressSpeed - GVL.r_PressSpeedDintMin)/ r_TicksPerFoot); 
+	ELSE //Determine error (zero or negative) and set error message	
+		//Tick per foot is zero - bad, will cause zero divide error
+	END_IF
+ELSE //
+	// Calculate press speed in feet per minute using voltage.  Input is a INT(16 bits), output is an WORD (16bit)
+	// usually from EL3068 terminal
+	IF (GVL.i_TicksPerFoot > 0) THEN 
+			IF (GVL_IO.i_PressSpeed < GVL.r_PressSpeedIntMin) THEN
+				i_PressSpeed:= REAL_TO_INT(GVL.r_PressSpeedIntMin);
+			ELSE
+				i_PressSpeed:= GVL_IO.i_PressSpeed;
+			END_IF
+			r_PressSpeed:= INT_TO_REAL(i_PressSpeed);
+			r_TicksPerFoot:= INT_TO_REAL(GVL.i_TicksPerFoot);
+			
+			GVL.mb_Output_Registers[GVL.PRESSSPEEDFPM]:=  REAL_TO_WORD((r_PressSpeed - GVL.r_PressSpeedIntMin)/ r_TicksPerFoot); // w_PressSeed:=
+//			GVL.mb_Output_Registers[GVL.PRESSSPEEDFPM]:=  REAL_TO_WORD((i_PressSpeed)/ GVL.i_TicksPerFoot); 
+	ELSE //Determine error (zero or negative) and set error message	
+		//Tick per foot is zero - bad, will cause zero divide error
+	END_IF
+	
+END_IF
+// END_IF // End encoder/voltage
+
+//**************************************
+//Inker function changed and Function OFF
+FB_FunctionChanged();
+FB_InkWaterOFF();
+
+//**************************************
+// PERFORM SWEEP operations
+IF( GVL.mb_Output_Coils[GVL.ENABLEINKSWEEPCONTROL] ) THEN
+
+	// consider using this data to restrict operations when using the calibration tool 
+	// GVL.mb_Output_Registers[GVL.REALTIME_DATA_SELECTION]
+	IF GVL.mb_Output_Registers[GVL.REALTIME_DATA_SELECTION] = 0 THEN
+	
+		FB_InkRamping();			//ink ramping if enabled
+		CASE GVL.mb_Output_Registers[GVL.INKERHARDWARETYPE] OF
+		GVL.SWPWTR_TIME:			//move by time
+	//		FB_InkSweep_Time();				//**************************** finish this code for time ONLY !!!!!!! **********
+		GVL.SWPWTR_FB:			//move by analog feedback
+			FB_InkSweep_FB();
+		GVL.SWPWTR_OUTPUT:
+			FB_InkSweep_Out();	//analog output
+		END_CASE
+	END_IF
+END_IF
+
+//**************************************
+// PERFORM Water operations
+IF( GVL.mb_Output_Coils[GVL.ENABLEWATERCONTROL]) THEN
+
+	// consider using this data to restrict operations when using the calibration tool 
+	// GVL.mb_Output_Registers[GVL.REALTIME_DATA_SELECTION]
+	IF GVL.mb_Output_Registers[GVL.REALTIME_DATA_SELECTION] = 0 THEN
+		FB_WaterRamping();		//water ramping if enabled
+		CASE GVL.mb_Output_Registers[GVL.WATERHARDWARETYPE] OF
+		GVL.SWPWTR_TIME:			//move by time
+	//		FB_WaterSweep_Time();			//**************************** finish this code for time ONLY !!!!!!! **********
+		GVL.SWPWTR_FB:			//move by analog feedback
+//			FB_WaterSweep_FB();				//******************* for water positioners with FB **************
+		GVL.SWPWTR_OUTPUT:
+			FB_WaterSweep_Out();	//analog output
+		END_CASE
+	END_IF
+END_IF
+
+
+//**************************************
+// PERFORM INK SURGE AND WATER FLOOD
+//   Set Ink Surge
+IF (GVL.mb_Output_Coils[GVL.ENABLEINKSURGE] = TRUE)  THEN // Ink surge enabled	
+	FB_InkSurge();
+END_IF 
+ // Set Water Flood
+IF (GVL.mb_Output_Coils[GVL.ENABLEWATERFLOOD] = TRUE)  THEN // Flood surge enabled
+	FB_WaterFlood();	 
+END_IF
+
+//**************************************
+ // SET INK DUCTOR POSITION
+IF (GVL.mb_Output_Coils[GVL.ENABLEINKINGHOLDOFF] = TRUE) THEN //ductor output enabled
+	FB_SetDuctor();
+END_IF
+
+ //**************************************
+// SET INK WASHUP
+IF (GVL.mb_Output_Coils[GVL.ENABLEINKERWASHUP] = TRUE) THEN  // Ink Wash Enabled
+	FB_InkWashUp();
+END_IF
+
+//Real-time monitoring of selected analog inputs and outputs
+FB_RealtimeSupport();
+
+//**************************************
+// PERFORM Register operations
+
+IF( GVL.mb_Output_Coils[GVL.ENABLEREGISTER] ) THEN		//if register feature is turned on
+
+	// consider using this data to restrict operations when using the calibration tool 
+	// GVL.mb_Output_Registers[GVL.REALTIME_DATA_SELECTION]
+	IF (GVL.mb_Output_Registers[GVL.REALTIME_DATA_SELECTION] < 22) THEN
+		FOR Index := 0 TO (GVL.w_MAXFOUNTAINS) DO 	//normal operations - loop ALL the configured fountains - this loop should be only 6 ftns
+			//Index := 5;										//debug for single fountain index
+			IF ( GVL.mb_Output_Coils[GVL.ENABLEFOUNTAIN + Index] ) THEN		//is this fountain enabled?
+				FOR iMotor := 0 TO GVL.w_MAXREGISTERMOTORS DO		//normal operations - loop ALL the configured motor types (circ, lat, skew)
+					//iMotor := 0;							//debug for single motor type
+					b_RegisterEnable[Index] := TRUE; //GVL.w_RegisterConfig[Index,iMotor,5 ].0 OR GVL.w_RegisterConfig[Index,iMotor,5 ].2 OR GVL.w_RegisterConfig[Index,iMotor,5 ].5;
+					IF (b_RegisterEnable[Index]) THEN															//skip if no pot and no limit switches
+						w_temp_index	:= GVL.RUNREG_START+(GVL.RUNREG_SIZE*3*Index)+(GVL.RUNREG_SIZE*iMotor);
+						IF (Index > 4) THEN  //special offset for inker 6+ addressing for register runtime
+							w_temp_index	:= GVL.RUNREG_START+(GVL.RUNREG_SIZE*3*Index)+(GVL.RUNREG_SIZE*iMotor)+10;
+						END_IF
+						b_SpeedInterlock := GVL.w_RegisterConfig[Index,iMotor,5 ].6; //use the interlock enable in MAIN
+	
+						CASE iMotor OF			//pickup the current state of the limits switches and pot feedback data for inker and motor type
+						GVL.iCirc:
+							iLimitMinus := GVL_IO.CircMotorLimit[Index,GVL.iPlus];
+							iLimitPlus 	:= GVL_IO.CircMotorLimit[Index,GVL.iMinus];
+							iPotFB		:= 	GVL_IO.CircMotorPot[Index];	
+						GVL.iLat:
+							iLimitMinus := GVL_IO.LateralMotorLimit[Index,GVL.iPlus];
+							iLimitPlus 	:= GVL_IO.LateralMotorLimit[Index,GVL.iMinus];
+							iPotFB		:= 	GVL_IO.LateralMotorPot[Index];	
+						END_CASE	
+						FB_AVTReg_arr[Index,iMotor](					// call to main register logic FB, each motor has it's own instance
+							iSETUP_MinPos := 	GVL.w_RegisterConfig[Index,iMotor,0 ],	//calc'd to register scale, in MM x100
+							iSETUP_MaxPos := 	GVL.w_RegisterConfig[Index,iMotor,1 ],	//calc'd to register scale, in MM x100
+							iSETUP_FBatMin:= 	GVL.w_RegisterConfig[Index,iMotor,2 ],	//calc'd to register scale, voltage calib x1000
+							iSETUP_FBatMax:= 	GVL.w_RegisterConfig[Index,iMotor,3 ],	//calc'd to register scale, voltage calib x1000
+							iSETUP_Velocity:= 	GVL.w_RegisterConfig[Index,iMotor,4 ],	//slope x100
+							iSETUP_enFeedBack			:= GVL.w_RegisterConfig[Index,iMotor,5 ].0,		//report status position from pot feedback
+							iSETUP_enFeedBackPositioing	:= GVL.w_RegisterConfig[Index,iMotor,5 ].1,		//move motor according to slope timing
+							iSETUP_enLimitSw			:= GVL.w_RegisterConfig[Index,iMotor,5 ].2,		//are 2 limit switches in use?
+							iSETUP_InvertFB				:= GVL.w_RegisterConfig[Index,iMotor,5 ].3,		//is feedback reversed
+							iSETUP_InvertOutputs		:= GVL.w_RegisterConfig[Index,iMotor,5 ].4,		//are motors outputs swapped
+							iSETUP_SpeedInterlock		:= GVL.w_RegisterConfig[Index,iMotor,5 ].6,		//is the press moving? allow motor change
+							iActualPosFB				:= iPotFB,									// raw 16bit feedback
+							iLimitSwPlus				:= iLimitPlus,								//current switch states
+							iLimitSwMinus				:= iLimitMinus,	//		
+							iCONTROL_reqPosition		:= WORD_TO_INT(GVL.mb_Output_Registers[w_temp_index+(GVL.iRequestedPostion)]),	 
+																	//requested motor position change in MM +/- , if needed
+							iCONTROL_bits:= 		WORD_TO_INT(GVL.mb_Output_Registers[w_temp_index+(GVL.iBoolControl)]),			
+																	//control booleans requested operation
+							qRegisterPlus 	=>	b_Plus_Out,					//returned motor output boolean for positive direction
+							qRegisterMinus	=>	b_Minus_Out,				//returned motor output boolean for negative direction
+							qSTATUS_Position => i_temp_position,			//calc'd to register scale, register position from pot feedback 
+																			//  (not read in this logic, used from the input data)
+							qSTATUS_bits	=> 	i_temp_bools				//status booleans from main logic
+						);
+						
+						GVL.mb_Output_Registers[		// update the current motor position for MODBUS address of slave devices +/- x100 MM
+									w_temp_index+(GVL.iActualPosition)] := INT_TO_WORD(i_temp_position);
+						GVL.mb_Output_Registers[		// update the current motor booleans status for MODBUS address of slave devices
+										w_temp_index+(GVL.iBoolStatus)] := INT_TO_WORD(i_temp_bools);
+			
+						IF ((b_SpeedInterlock AND (GVL.mb_Output_Registers[GVL.PRESSSPEEDFPM] > 0)) OR ( NOT b_SpeedInterlock)) THEN
+							//do not allow motors to move if press not moving, if interlock option is enabled
+							CASE iMotor OF			//set the motor outputs here
+							GVL.iCirc:
+								GVL_IO.CircMotorRelay[Index,GVL.iMinus]	:=	b_Minus_Out;
+								GVL_IO.CircMotorRelay[Index,GVL.iPlus]	:=	b_Plus_Out;
+							GVL.iLat:
+								GVL_IO.LateralMotorRelay[Index,GVL.iMinus]	:=	b_Minus_Out;
+								GVL_IO.LateralMotorRelay[Index,GVL.iPlus]	:=	b_Plus_Out;
+							END_CASE	
+						END_IF
+						IF ((b_SpeedInterlock AND (GVL.mb_Output_Registers[GVL.PRESSSPEEDFPM] = 0))) THEN
+							CASE iMotor OF			//disable the motor outputs here is press speed is zero
+							GVL.iCirc:
+								GVL_IO.CircMotorRelay[Index,GVL.iMinus]	:=	FALSE;
+								GVL_IO.CircMotorRelay[Index,GVL.iPlus]	:=	FALSE;
+							GVL.iLat:
+								GVL_IO.LateralMotorRelay[Index,GVL.iMinus]	:=	FALSE;
+								GVL_IO.LateralMotorRelay[Index,GVL.iPlus]	:=	FALSE;
+							END_CASE	
+							
+						END_IF
+						
+					END_IF					//end of enabled register
+				END_FOR;  	//end of motor loop
+			END_IF		//if fountain enabled
+		END_FOR;		//end of ftn loop
+	END_IF		//real time data selection
+END_IF		//register feature enabled
+
+// *** end of MAIN ***
+
+]]></ST>
+    </Implementation>
+    <LineIds Name="MAIN">
+      <LineId Id="1309" Count="34" />
+      <LineId Id="2127" Count="0" />
+      <LineId Id="1344" Count="0" />
+      <LineId Id="3149" Count="0" />
+      <LineId Id="1345" Count="2" />
+      <LineId Id="3142" Count="3" />
+      <LineId Id="3233" Count="2" />
+      <LineId Id="3146" Count="0" />
+      <LineId Id="3152" Count="0" />
+      <LineId Id="1348" Count="4" />
+      <LineId Id="1616" Count="2" />
+      <LineId Id="1685" Count="0" />
+      <LineId Id="1688" Count="0" />
+      <LineId Id="1686" Count="1" />
+      <LineId Id="1682" Count="0" />
+      <LineId Id="2799" Count="3" />
+      <LineId Id="1505" Count="1" />
+      <LineId Id="1668" Count="7" />
+      <LineId Id="1507" Count="2" />
+      <LineId Id="1354" Count="15" />
+      <LineId Id="1882" Count="0" />
+      <LineId Id="1370" Count="13" />
+      <LineId Id="1883" Count="0" />
+      <LineId Id="1384" Count="4" />
+      <LineId Id="1453" Count="1" />
+      <LineId Id="1389" Count="2" />
+      <LineId Id="1814" Count="0" />
+      <LineId Id="1392" Count="0" />
+      <LineId Id="1815" Count="2" />
+      <LineId Id="1393" Count="13" />
+      <LineId Id="2566" Count="0" />
+      <LineId Id="1407" Count="1" />
+      <LineId Id="1452" Count="0" />
+      <LineId Id="1409" Count="12" />
+      <LineId Id="143" Count="18" />
+      <LineId Id="166" Count="0" />
+      <LineId Id="1749" Count="0" />
+      <LineId Id="1747" Count="1" />
+      <LineId Id="167" Count="0" />
+      <LineId Id="1689" Count="0" />
+      <LineId Id="168" Count="0" />
+      <LineId Id="2" Count="0" />
+      <LineId Id="170" Count="1" />
+      <LineId Id="176" Count="3" />
+      <LineId Id="2490" Count="0" />
+      <LineId Id="181" Count="0" />
+      <LineId Id="1884" Count="2" />
+      <LineId Id="1897" Count="1" />
+      <LineId Id="2051" Count="0" />
+      <LineId Id="1818" Count="0" />
+      <LineId Id="2052" Count="0" />
+      <LineId Id="190" Count="0" />
+      <LineId Id="2128" Count="0" />
+      <LineId Id="2485" Count="0" />
+      <LineId Id="2487" Count="1" />
+      <LineId Id="2486" Count="0" />
+      <LineId Id="191" Count="0" />
+      <LineId Id="193" Count="1" />
+      <LineId Id="2129" Count="0" />
+      <LineId Id="195" Count="0" />
+      <LineId Id="197" Count="0" />
+      <LineId Id="202" Count="0" />
+      <LineId Id="2879" Count="0" />
+      <LineId Id="203" Count="0" />
+      <LineId Id="2964" Count="0" />
+      <LineId Id="2972" Count="0" />
+      <LineId Id="2965" Count="5" />
+      <LineId Id="2958" Count="0" />
+      <LineId Id="205" Count="6" />
+      <LineId Id="2723" Count="0" />
+      <LineId Id="215" Count="0" />
+      <LineId Id="223" Count="0" />
+      <LineId Id="1972" Count="1" />
+      <LineId Id="1975" Count="0" />
+      <LineId Id="1974" Count="0" />
+      <LineId Id="1976" Count="0" />
+      <LineId Id="224" Count="2" />
+      <LineId Id="2645" Count="0" />
+      <LineId Id="228" Count="0" />
+      <LineId Id="2644" Count="0" />
+      <LineId Id="230" Count="2" />
+      <LineId Id="2647" Count="0" />
+      <LineId Id="233" Count="1" />
+      <LineId Id="2298" Count="0" />
+      <LineId Id="235" Count="1" />
+      <LineId Id="2479" Count="2" />
+      <LineId Id="2483" Count="0" />
+      <LineId Id="2482" Count="0" />
+      <LineId Id="1899" Count="0" />
+      <LineId Id="245" Count="10" />
+      <LineId Id="2215" Count="0" />
+      <LineId Id="256" Count="0" />
+      <LineId Id="267" Count="1" />
+      <LineId Id="3053" Count="0" />
+      <LineId Id="3056" Count="7" />
+      <LineId Id="3054" Count="1" />
+      <LineId Id="3052" Count="0" />
+      <LineId Id="2975" Count="0" />
+      <LineId Id="269" Count="0" />
+      <LineId Id="2880" Count="0" />
+      <LineId Id="2648" Count="0" />
+      <LineId Id="272" Count="4" />
+      <LineId Id="2803" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

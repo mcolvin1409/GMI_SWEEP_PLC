@@ -1,0 +1,197 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.6">
+  <POU Name="FBInitializeRamping" Id="{e62a435b-1365-4353-8d6a-72a7bddefe53}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FBInitializeRamping
+///SDOC/////////////////////////////////////////////////////////////////////////
+//
+//  FBInitializeRamping.TcPOU      - Function Block - Initializing Ink Sweep and Water Control ramp curve data  - AVT PLC 
+//						Version 1
+//  Author:         Gary Stefancik                         Date: Aug 23, 2017 
+//
+//	Beckhoff TC3 Structured Text for CX50x0 PLC
+//
+//	includes features:
+//		10 inker enables
+//		Ink ramping
+//		Water ramping
+//		Ink Surge
+//		Water Flood
+//		Ink Ducting (Hold Off)
+//		Ink Wash Up 
+//		Ink Function Control (Off/manual/auto)
+//		water Function Control (off/manual/auto)
+//		Inker positioner with feedback
+//		Water positioner with feedback
+//		Inker Analog Control
+//		water Analog Control
+//		Inker Positioner output cancel
+//		Water Positioner output cancel
+///////////////////////////////////////////////////////////////////////SDOCEND//
+
+VAR_INPUT
+
+END_VAR
+VAR_OUTPUT
+END_VAR
+VAR
+	FB_MBReadInk		:FB_MBReadRegs;	//instance for ink curve - Beckhoff FB from MODBUS server library
+	FB_MBReadWater	:FB_MBReadRegs;	//instance for water curve - Beckhoff FB from MODBUS server library
+	FB_RampingCalcs	:FBRampCalc;		//instance for ramping calculations after ramping curves are loaded
+ 
+	b_InkBusy		:BOOL;			//test only - watch from IDE
+	b_InkBusyTest 	:BOOL:= FALSE;	//test only - watch from IDE
+	b_WaterBusyTest	:BOOL:= FALSE;	//test only - watch from IDE
+	b_WaterBusy		:BOOL;			//test only - watch from IDE
+	b_ReadInk         :BOOL;			// temp for ink curve read
+	b_ReadWater		:BOOL;			// temp for water curve read
+	errboolI			:BOOL;			//from MODBUS call
+	errboolW			:BOOL;			//from MODBUS call
+	errorRI			:UDINT;			//from MODBUS call
+	errorRW			:UDINT;			//from MODBUS call
+
+	ElapsedTime     	:TIME;			//wait for MODBUS calls to complete
+	TimerTON			:TON;			//wait for MODBUS calls to complete
+	TimerDone		:BOOL;			//wait for MODBUS calls to complete
+	TonIn			:BOOL;			//wait for MODBUS calls to complete
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[
+(************************************************************************************************
+ *
+ *   FUNCTION BLOCK	:FBInitializeRamping
+ *
+ *   Author		:	Gary Stefancik
+ *
+ *   Description:	Initializes ink/Water Ramping.  Retrieves the ramping trim adjustments from Modbus memory for use in the PLC. 
+ *
+ *   Parameters	:	void
+ *
+ *   Returns	:	void	
+ *
+ *   History	:   29-Oct-17	GaryS 	Created
+ *					31-Oct-17	GaryS 	Rewrote the FB to make it reliable	
+ *				12-Dec-17	Mark C Removed the magic number with macros WI 143332
+ *
+***************************************************************************************************)
+
+
+IF NOT (b_ReadInk) THEN
+   b_ReadInk := TRUE;					// ink curve data read from MODBUS
+   FB_MBReadInk(
+		sIPAddr:= '172.31.1.91', 	// STRING(15) Is a string containing the IP address of the target device.
+		nTCPPort:= 502, 				// UINT:= MODBUS_TCP_PORT, Port number of the target device.
+		nUnitID:= 16#FF, 				// BYTE:=16#FF,  Identification number of a serial sub-network device. If a device is addressed directly via TCP/IP, this value must be 16#FF.
+		nQuantity:= 200, 				// WORD, Number of output registers (data words) to be read. The value of nQuantity must be > 0. (10 ftns x 20 data points per curve)
+		nMBAddr:= 12999, 				// WORD,  Start address of the output registers to be read (word offset)
+										// for some reason, the first addr is used for a special reason and the next addr is used for 1st data element
+		cbLength:= SIZEOF(GVL.w_InkRampTrimAdjust),  // UDINT, Contains the max. byte size of the destination buffer. The minimum buffer byte size must be: nQuantity * 2.
+		pDestAddr:= ADR(GVL.w_InkRampTrimAdjust), 	//	UDINT, Contains the address of the destination buffer into which the data are to be read. 
+												//The buffer can be a single variable, an array or a structure, whose address can be found with the ADR operator.
+		bExecute:= TRUE, 				// BOOL, The function block is activated by a rising edge at this input.
+		tTimeout:= T#3S, 				// TIME, States the length of the timeout that may not be exceeded by execution of the ADS command.
+							//VAR_OUTPUT
+		bBusy=> b_InkBusy, 			// BOOL, When the function block is activated this output is set. It remains set until an acknowledgement is received.
+		bError=> errboolI, 			// BOOL, If an ADS error should occur during the transfer of the command, then this output is set once the bBusy output is reset.
+		nErrId=> errorRI, 			// UDINT, Supplies the ADS error number when the bError output is set.
+		cbRead=> );					// UDINT, Contains the number of bytes currently read.
+ELSE 
+	IF NOT FB_MBReadInk.bBUSY THEN
+		b_ReadInk :=FALSE;			// if the MODBUS read has already started during last PLC cycle and not done yet, keep it active during this cycle.
+	END_IF
+   	FB_MBReadInk(bExecute:=FALSE);		// keep reading if already started read.
+END_IF 
+
+
+IF NOT (b_ReadWater) THEN
+   	b_ReadWater := TRUE;				//same as above for water curve data read from MODBUS
+	FB_MBReadWater(
+		sIPAddr:= '172.31.1.91', 
+		nTCPPort:= 502, 
+		nUnitID:= 16#FF, 
+		nQuantity:= 200, 				// WORD, Number of output registers (data words) to be read. The value of nQuantity must be > 0. (10 ftns x 20 data points per curve)
+		nMBAddr:= 14999, 				// WORD,  Start address of the output registers to be read (word offset)
+										// for some reason, the first addr is used for a special reason and the next addr is used for 1st data element
+		cbLength:= SIZEOF(GVL.w_WaterRampTrimAdjust), 
+		pDestAddr:= ADR(GVL.w_WaterRampTrimAdjust), 
+		bExecute:= TRUE, 
+		tTimeout:= T#3S, 
+		bBusy=> b_WaterBusy, 
+		bError=> errboolW, 
+		nErrId=> errorRW, 
+		cbRead=> );
+ELSE 
+	IF NOT FB_MBReadWater.bBUSY THEN
+		b_ReadWater :=FALSE;
+	END_IF
+   	FB_MBReadWater(bExecute:=FALSE);
+END_IF 
+
+
+// TEST ONLY - debug from IDE
+IF (b_InkBusy = TRUE) THEN
+	b_InkBusyTest:= TRUE;
+END_IF
+IF (b_WaterBusy = TRUE) THEN
+	b_WaterBusyTest:= TRUE;
+END_IF
+
+
+IF (TimerTON.Q = TRUE) THEN						//if timer is done
+//If both functions are NOT busy THEN turn on both executes AND set mb[22] TO false, leaving UNTIL next initialization
+	GVL.mb_Output_Coils[GVL.ENABLERAMPINIT]:= FALSE; 	// Don't come back until new initialization
+	FB_RampingCalcs();							//ramping data should loaded, perform static calcs now for both ink and water.
+	TonIn:= FALSE;								// Don't run the timer now.
+	TimerTON(IN:=TonIn  , PT:=T#10S , Q=> , ET=> ); 	//does this turn the .Q to false?
+	RETURN;										//why do we need this return here?
+END_IF
+TonIn:=TRUE;
+TimerTON(IN:=TonIn  , PT:=T#10S , Q=> , ET=>ElapsedTime ); 	// turn on the timer for 10s
+
+//--- end of FBInitializeRamping  ---
+]]></ST>
+    </Implementation>
+    <LineIds Name="FBInitializeRamping">
+      <LineId Id="599" Count="6" />
+      <LineId Id="607" Count="5" />
+      <LineId Id="899" Count="0" />
+      <LineId Id="613" Count="0" />
+      <LineId Id="11" Count="0" />
+      <LineId Id="822" Count="0" />
+      <LineId Id="827" Count="1" />
+      <LineId Id="832" Count="0" />
+      <LineId Id="846" Count="7" />
+      <LineId Id="981" Count="0" />
+      <LineId Id="854" Count="4" />
+      <LineId Id="838" Count="0" />
+      <LineId Id="840" Count="0" />
+      <LineId Id="860" Count="0" />
+      <LineId Id="841" Count="0" />
+      <LineId Id="859" Count="0" />
+      <LineId Id="843" Count="0" />
+      <LineId Id="689" Count="0" />
+      <LineId Id="900" Count="1" />
+      <LineId Id="904" Count="0" />
+      <LineId Id="902" Count="0" />
+      <LineId Id="910" Count="9" />
+      <LineId Id="982" Count="0" />
+      <LineId Id="920" Count="2" />
+      <LineId Id="903" Count="0" />
+      <LineId Id="923" Count="4" />
+      <LineId Id="690" Count="1" />
+      <LineId Id="861" Count="6" />
+      <LineId Id="692" Count="1" />
+      <LineId Id="881" Count="2" />
+      <LineId Id="887" Count="2" />
+      <LineId Id="891" Count="0" />
+      <LineId Id="879" Count="0" />
+      <LineId Id="898" Count="0" />
+      <LineId Id="880" Count="0" />
+      <LineId Id="895" Count="2" />
+      <LineId Id="894" Count="0" />
+      <LineId Id="869" Count="0" />
+      <LineId Id="874" Count="1" />
+      <LineId Id="878" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

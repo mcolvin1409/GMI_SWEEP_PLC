@@ -1,0 +1,137 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.10">
+  <POU Name="FBInkWashUp" Id="{314e79ef-5974-41f4-9607-370cb7bab502}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FBInkWashUp
+VAR_INPUT
+END_VAR
+VAR_OUTPUT
+END_VAR
+VAR
+	// === LOCAL DATA === NOT saved over power cycles
+	Index 				 	:WORD;								//temp word index for fountain loop
+	Index_offset			:WORD;								//index offset to runtime data for fountains 7 to 10; 0 or 220
+	WashUpTON   			:ARRAY[0..GVL.w_MAXFOUNTAINS] OF TON;
+	
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[(************************************************************************************************
+ *
+ *   FUNCTION BLOCK	:FBInkWashUp
+ *
+ *   Author		:	Gary Stefancik
+ *
+ *   Description:	Perform Ink Wash-up.  Turn on/off ink wash motors while in manual mode
+ *
+ *   Parameters	:	void
+ *
+ *   Returns	:	void	
+ *
+ *   History	:   29-Oct-17   GaryS 	Created
+ *					31-Oct-17	GaryS	Preserve ductor settings
+ *					01-Nov-17   GaryS   Set ductor to zero as required
+ *					14-Nov-17	GaryS	Changes for Ardagh, WI 143332
+ *				12-Dec-17	Mark C Removed the magic number with macros WI 143332
+ *
+***************************************************************************************************)
+
+// If enable fountain bool TRUE and wash up trigger bool TRUE; turn on wash motor on and set MaxInkWashUpTimer ON, save the ductor value and set to zero
+// Ink WashUp trigger bool is FALSE; turn off wash motor and reset MaxInkWashUpTimer 
+// If Timer expires; turn off wash motor, reset Timer and set Wash-up trigger bool to FALSE
+//no change to inker trim value
+
+FOR Index:= 0 TO (GVL.w_MAXFOUNTAINS) DO
+	
+	//Index := 5;  //debug a single fountain, one at a time, 0 to max-1
+	Index_offset := 0;		//ftns 1 to 6, WORDRUNTIME only
+	IF( Index > 5 )THEN
+		Index_offset := GVL.SWPWTR_7_10_FTN_OFFSET;	//ftns 7 to 10, WORDRUNTIME only
+	END_IF	
+	IF 	(GVL.mb_Output_Coils[GVL.ENABLEFOUNTAIN + Index] = TRUE) THEN	// If fountain enabled
+		
+		// Wash-Up trigger on, inker disabled, and wash-up motor is off; then turn on wash-up motor and timer on
+		// Start wash-up if inker funct is OFF
+		IF ((GVL.mb_Output_Coils[GVL.INKWASHUP +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] = TRUE) AND // If Wash-up trigger bool is TRUE (slave is turning on)
+			(GVL.mb_Output_Coils[GVL.InkSweep_OFF +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] = TRUE)) AND  // inker funct OFF
+			(GVL_IO.InkWashUp[Index] = FALSE) THEN 							// inker wash-up motor is off now, then turn on wash-up motor and max on timer
+				GVL.w_Ductor_WASHorOFFactive[Index] := 2; 						//OFF was first, use OFF mode's previous ductor settings
+				GVL.w_PreviousDuctorWashUp[Index]:= GVL.w_PreviousDuctorOff[Index];
+				GVL.mb_Output_Registers[GVL.INKDUCTORVALUE + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]:= 0;  // set ductor to zero as required
+				GVL_IO.InkWashUp[Index]:= TRUE; 												// Turn on wash-up motor
+				WashUpTON[Index].PT:= T#30M;  													// Set Timer to hard-coded max time 30 minutes.  
+				WashUpTON[Index].IN:= TRUE; 													// Turn on timer
+		END_IF	
+		
+		// Start wash-up if: Wash-Up trigger on,inker funct is NOT OFF, wash-up motor off, and imp off
+		IF ((GVL.mb_Output_Coils[GVL.INKWASHUP +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] = TRUE) AND // If Wash-up trigger bool is TRUE (slave is turning on)
+			(GVL.mb_Output_Coils[GVL.InkSweep_OFF +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] = FALSE) AND  // inker funct NOT OFF
+			(GVL_IO.InkWashUp[Index] = FALSE) AND (GVL_IO.b_Impression = FALSE)) THEN 	// inker wash-up motor is off now and imp off, then turn on wash-up motor and max on timer
+				GVL.w_Ductor_WASHorOFFactive[Index] := 1; 						//WASH was first, use current settings as previous ductor settings
+				GVL.w_PreviousDuctorWashUp[Index]:= GVL.mb_Output_Registers[GVL.INKDUCTORVALUE + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)];  // preserve ductor value
+				GVL.mb_Output_Registers[GVL.INKDUCTORVALUE + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]:= 0;  // set ductor to zero as required
+				GVL_IO.InkWashUp[Index]:= TRUE; 												// Turn on wash-up motor
+				WashUpTON[Index].PT:= T#30M;  													// Set Timer to hard-coded max time 30 minutes.  
+				WashUpTON[Index].IN:= TRUE; 													// Turn on timer
+		END_IF	
+		
+		//  Impression is ON and inker is enabled, and wash-up motor is on; then turn off wash-up motor/ max on timer
+		IF (
+			((GVL_IO.b_Impression = TRUE)) AND  (GVL.mb_Output_Coils[GVL.InkSweep_OFF +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] = FALSE)  AND // Impression is TRUE while inker enabled
+			(GVL_IO.InkWashUp[Index] = TRUE)) THEN 										// AND Wash Motor on
+				GVL_IO.InkWashUp[Index]:= FALSE;										// Turn wash-up motor off
+				WashUpTON[Index].IN:= FALSE;	   										// Set timer off	
+				GVL.mb_Output_Registers[GVL.INKSURGECOUNTDOWN + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]:= 0; 		// Set SurgeCountdown to 0 
+				GVL.mb_Output_Coils[GVL.INKWASHUP + (Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;  //tell slaves the washup is off.
+				IF ( GVL.mb_Output_Coils[GVL.InkSweep_OFF +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] = FALSE ) THEN		//if not OFF, restore ductor setting 
+					GVL.mb_Output_Registers[GVL.INKDUCTORVALUE + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]:= GVL.w_PreviousDuctorWashUp[Index];	//Restore ductor value from previous
+					GVL.w_Ductor_WASHorOFFactive[Index] := 0; 							//neither mode is active now
+				END_IF
+		END_IF
+		
+		//  Wash-up trigger is False,  and wash-up motor is on; then slaves want washup off - turn off wash-up motor/ max on timer
+		IF ((GVL.mb_Output_Coils[GVL.INKWASHUP + (Index * GVL.BOOLRUNTIMEGROUPSIZE)] = FALSE) AND // Wash-up trigger bool is FALSE
+			(GVL_IO.InkWashUp[Index] = TRUE)) THEN 										// AND Wash Motor on
+				GVL_IO.InkWashUp[Index]:= FALSE;										// Turn wash-up motor off
+				WashUpTON[Index].IN:= FALSE;	   										// Set timer off	
+				GVL.mb_Output_Coils[GVL.INKWASHUP +(Index * GVL.BOOLRUNTIMEGROUPSIZE)]:= FALSE;	// Set Wash-up trigger Flag to FALSE
+				GVL.mb_Output_Registers[GVL.INKSURGECOUNTDOWN + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]:= 0; 		// Set SurgeCountdown to 0 
+				IF ( GVL.mb_Output_Coils[GVL.InkSweep_OFF +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] = FALSE ) THEN		//if not OFF, restore ductor setting 
+					GVL.mb_Output_Registers[GVL.INKDUCTORVALUE + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]:= GVL.w_PreviousDuctorWashUp[Index];	//Restore ductor value from previous
+					GVL.w_Ductor_WASHorOFFactive[Index] := 0; 							//neither mode is active now
+				END_IF
+		END_IF
+		
+		// Wash-up motor is running but timer expired. turn off Wash-up motor and max on timer 
+		IF ((GVL_IO.InkWashUp[Index] = TRUE) AND 										// If Wash-up motor is on
+			(WashUpTON[Index].Q = TRUE)) THEN												//max timer has expired
+				GVL_IO.InkWashUp[Index]:= FALSE;											// Turn motor off
+				WashUpTON[Index].IN:= FALSE; 												// Reset Timer
+				GVL.mb_Output_Coils[GVL.INKWASHUP +(Index * GVL.BOOLRUNTIMEGROUPSIZE)]:= FALSE;	// Set Wash-up trigger Flag to FALSE
+				GVL.mb_Output_Registers[GVL.INKSURGECOUNTDOWN + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]:= 0; // Set SurgeCountdown to 0 
+				IF ( GVL.mb_Output_Coils[GVL.InkSweep_OFF +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] = FALSE ) THEN		//if not OFF, restore ductor setting 
+					GVL.mb_Output_Registers[GVL.INKDUCTORVALUE + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]:= GVL.w_PreviousDuctorWashUp[Index];	//Restore ductor value from previous
+					GVL.w_Ductor_WASHorOFFactive[Index] := 0; 							//neither mode is active now
+				END_IF
+		END_IF
+	END_IF	// fountain is enabled
+	
+	WashUpTON[Index](IN:= , PT:= , Q=> , ET=> ); // Run timer if IN is TRUE
+
+END_FOR  //fountain loop
+//----------------------------------- End of Inkwashup.TcPOU ------------------------------------------------
+]]></ST>
+    </Implementation>
+    <LineIds Name="FBInkWashUp">
+      <LineId Id="425" Count="32" />
+      <LineId Id="459" Count="9" />
+      <LineId Id="508" Count="1" />
+      <LineId Id="511" Count="9" />
+      <LineId Id="469" Count="5" />
+      <LineId Id="533" Count="0" />
+      <LineId Id="475" Count="20" />
+      <LineId Id="85" Count="6" />
+      <LineId Id="93" Count="3" />
+      <LineId Id="2" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

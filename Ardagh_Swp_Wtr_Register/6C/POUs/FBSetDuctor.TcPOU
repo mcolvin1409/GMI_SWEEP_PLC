@@ -1,0 +1,74 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.10">
+  <POU Name="FBSetDuctor" Id="{bf86b9c3-accf-498a-8872-5dfa8f75723d}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FBSetDuctor
+VAR_INPUT
+END_VAR
+VAR_OUTPUT
+END_VAR
+VAR
+	Index				:WORD;	//temp word for fountain loop
+	Index_offset			:WORD;								//index offset to runtime data for fountains 7 to 10; 0 or 220
+	DUCTOR_VALUE_0: INT;
+	DUCTOR_VALUE_2: INT;
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[(************************************************************************************************
+ *
+ *   FUNCTION BLOCK	:FBSetDuctor
+ *
+ *   Author		:	Gary Stefancik
+ *
+ *   Description:	Set the ductor value for the 3rd party PLC.  Set the ductor value according to the 
+ *					user defined setting in the MC Client.
+ *
+ *   Parameters	:	void
+ *
+ *   Returns	:	void	
+ *
+ *   History	:   29-Oct-17, GaryS Created
+ *				12-Dec-17	Mark C Removed the magic number with macros WI 143332
+ *				Dec 3 2018  Mark C removed the default setting of ductor value 0 from runtime area if out of bounds
+***************************************************************************************************)
+
+// For each enabled fountain set ink ductor according to client setting 
+FOR Index:= 0 TO (GVL.w_MAXFOUNTAINS) DO
+		//Index := 5;  //debug a single fountain, one at a time, 0 to max-1
+		Index_offset := 0;		//ftns 1 to 6, WORDRUNTIME only
+		IF( Index > 5 )THEN
+			Index_offset := GVL.SWPWTR_7_10_FTN_OFFSET;	//ftns 7 to 10, WORDRUNTIME only
+		END_IF	
+	
+		CASE GVL.mb_Output_Registers[GVL.INKDUCTORVALUE + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] OF
+			GVL.DUCTOR_VALUE_0:	GVL_IO.b_DuctorControlA[Index]:= TRUE;
+								GVL_IO.b_DuctorControlB[Index]:= TRUE;
+			GVL.DUCTOR_VALUE_1:	GVL_IO.b_DuctorControlA[Index]:= TRUE;
+								GVL_IO.b_DuctorControlB[Index]:= FALSE;
+			GVL.DUCTOR_VALUE_2:	GVL_IO.b_DuctorControlA[Index]:= FALSE;
+								GVL_IO.b_DuctorControlB[Index]:= TRUE;	
+			GVL.DUCTOR_VALUE_3:	GVL_IO.b_DuctorControlA[Index]:= FALSE;
+								GVL_IO.b_DuctorControlB[Index]:= FALSE;	
+		END_CASE;	
+
+END_FOR
+
+]]></ST>
+    </Implementation>
+    <LineIds Name="FBSetDuctor">
+      <LineId Id="154" Count="6" />
+      <LineId Id="168" Count="0" />
+      <LineId Id="161" Count="6" />
+      <LineId Id="82" Count="0" />
+      <LineId Id="173" Count="0" />
+      <LineId Id="83" Count="0" />
+      <LineId Id="87" Count="1" />
+      <LineId Id="100" Count="10" />
+      <LineId Id="185" Count="0" />
+      <LineId Id="111" Count="0" />
+      <LineId Id="118" Count="1" />
+      <LineId Id="38" Count="3" />
+      <LineId Id="2" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

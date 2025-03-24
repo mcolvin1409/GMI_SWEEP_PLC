@@ -1,0 +1,159 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.10">
+  <POU Name="FBInkRamping" Id="{5550922d-3884-47c9-b3bb-dff514778582}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FBInkRamping
+///SDOC/////////////////////////////////////////////////////////////////////////
+//
+//  FBInkRamping.TcPOU      - Function Block - Ink Ramping - adjustments to ink trim based on press speed - AVT PLC 
+//						Version 2
+//  Author:         Mark Colvin                        Date: Apr 20, 2018
+//
+//	Beckhoff TC3 Structured Text for CX50x0 PLC
+//
+//	includes features:
+//		10 inker enables
+//		Ink ramping
+//		Water ramping
+//		Ink Surge
+//		Water Flood
+//		Ink Ducting (Hold Off)
+//		Ink Wash Up 
+//		Ink Function Control (Off/manual/auto)
+//		water Function Control (off/manual/auto)
+//		Inker positioner with feedback
+//		Water positioner with feedback
+//		Inker Analog Control
+//		water Analog Control
+//		Inker Positioner output cancel
+//		Water Positioner output cancel
+///////////////////////////////////////////////////////////////////////SDOCEND//
+VAR_INPUT
+END_VAR
+VAR_OUTPUT
+END_VAR
+VAR
+	// === LOCAL DATA === NOT saved over power cycles
+
+	r_InkTrim			:ARRAY[0..GVL.w_MAXFOUNTAINS] OF REAL;		  //temp real for current water trim value
+	r_InkTrimInfluence	:ARRAY[0..GVL.w_MAXFOUNTAINS] OF REAL;        //temp real for water trim influence value 
+	r_InkTrimFactor		:ARRAY[0..GVL.w_MAXFOUNTAINS] OF REAL;        //temp real for water trim factor value 
+	w_InkTrim			:ARRAY[0..GVL.w_MAXFOUNTAINS] OF WORD;        //temp word for current water trim value 
+	w_InkTrim_slave			:ARRAY[0..GVL.w_MAXFOUNTAINS] OF WORD;        //temp word for current water trim value from slave input
+	
+	w_last_speed_zone		:WORD;		 //temp for LAST speed zone index
+	w_speed_index			:WORD;        //temp final speed zone index to use
+	Index				:WORD;	     	// temp index loop for fountains
+	Index_offset		:WORD;			//index offset to runtime data for fountains 7 to 10; 0 or 220
+	Index1				:WORD;        	// temp index loop for speed zone to use
+	
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[(************************************************************************************************
+ *
+ *   FUNCTION BLOCK	:FBInkRamping
+ *
+ *   Author		:	Gary Stefancik
+ *
+ *   Description:	Perform Ink Ramping  Change ink trim values based on configuration data and trim adjust values based on press speed.
+ *
+ *   Parameters	:	void
+ *
+ *   Returns	:	void	
+ *
+ *   History	:   20-Apr-18	MarkC 	Reworked with new 2018 formula for ramping adjustments.
+ *
+***************************************************************************************************)
+w_last_speed_zone := GVL.mb_Output_Registers[GVL.RAMPINGSPEEDDIVISIONS] -1;
+IF (GVL.mb_Output_Coils[GVL.ENABLEFULLINIT] = FALSE) AND (GVL.mb_Output_Coils[GVL.ENABLERAMPINIT] = FALSE)THEN		//do not process while initializing PLC or ramping curves
+	FOR Index := 0 TO (5) DO//GVL.w_MAXFOUNTAINS_REG) DO		//normal operations - loop ALL the configured fountains
+		//Index :=0;
+		IF( Index > 5 )THEN
+			Index_offset := GVL.SWPWTR_7_10_FTN_OFFSET;	//ftns 7 to 10, WORDRUNTIME only
+		END_IF	
+		IF (GVL.mb_Output_Coils[GVL.ENABLEFOUNTAIN + Index] = TRUE) THEN  // If Fountain enabled
+			w_InkTrim[Index] := GVL.mb_Output_Registers[GVL.SWEEPTRIM + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]; //current Ink trim to temp
+			r_InkTrim[Index]:= 		WORD_TO_REAL(w_InkTrim[Index]) ;  //current Ink trim value, convert to float temp
+			// IF ramping feature enabled and auto function is on
+			IF ((GVL.mb_Output_Registers[GVL.INKFUNCTSETTING + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] = GVL.AUTO_FUNCTION) AND  // Ink  function set to auto
+				(GVL.mb_Output_Coils[GVL.INKRAMPINGENABLED])) THEN 			// AND (GVL.b_SurgeOn[Index]=FALSE)) THEN  -- why is NO SURGE needed here???
+				//capture slave ink trim value here
+				IF	(GVL.mb_Output_Coils[GVL.InkSweepRUN + Index_offset + (Index * GVL.BOOLRUNTIMEGROUPSIZE)] = TRUE) AND 
+						(GVL.mb_Output_Coils[GVL.Inker_RUNNING + Index_offset + (Index * GVL.BOOLRUNTIMEGROUPSIZE)] = FALSE) THEN   //must be from slave, RUN now, not running,capture now
+							w_InkTrim_slave[Index] := GVL.mb_Output_Registers[GVL.SWEEPTRIM + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]; //current Ink trim to temp
+				END_IF
+				IF	(GVL.mb_Output_Coils[GVL.InkSweepRUN + Index_offset + (Index * GVL.BOOLRUNTIMEGROUPSIZE)] = FALSE) AND 
+						(GVL.mb_Output_Coils[GVL.Inker_RUNNING + Index_offset + (Index * GVL.BOOLRUNTIMEGROUPSIZE)] = FALSE) AND
+						w_InkTrim_slave[Index] > 0 									THEN   						//restore from slave (if valid) if stopping running
+							GVL.mb_Output_Registers[GVL.SWEEPTRIM + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] := w_InkTrim_slave[Index];
+				END_IF
+					// Test current press speed for proper speed index.
+					// Max 20 values, 19 ranges, each RampingSpeedFPM value is the min for that range.  last value is the max speed			
+				FOR Index1:= 0 TO w_last_speed_zone DO  
+					IF ((GVL.mb_Output_Registers[GVL.PRESSSPEEDFPM] >= GVL.mb_Output_Registers[GVL.w_RAMPINGSPEEDFPM + Index1]) AND  
+						(GVL.mb_Output_Registers[GVL.PRESSSPEEDFPM] <= GVL.mb_Output_Registers[GVL.w_RAMPINGSPEEDFPM + Index1 + 1])) THEN  
+							// Found proper index for the curve adjust here					
+						IF (GVL.mb_Output_Registers[GVL.PRESSSPEEDFPM] >= GVL.mb_Output_Registers[GVL.w_RAMPINGSPEEDFPM + w_last_speed_zone]) THEN 
+								// In case current press speed is greater than Max Press Speed
+							w_speed_index := w_last_speed_zone;
+						ELSE
+							w_speed_index := Index1;
+						END_IF
+					END_IF
+				END_FOR
+				r_InkTrimInfluence[Index]:= 	WORD_TO_REAL(GVL.mb_Output_Registers[GVL.INKTRIMINFLUENCE]); 		//configured trim influence setting
+				r_InkTrimFactor[Index]:= 	(r_InkTrim[Index] - 50.0) / (50.0 / r_InkTrimInfluence[Index]);				//calc the trim factor
+						// Motor Output %        = User Curve[ftn, speed] +                    Ink Trim Factor(from current trim) +     Ink Master Factor
+				r_InkTrim[Index] :=   (GVL.w_InkRampTrimAdjust[Index,w_speed_index ] + r_InkTrimFactor[Index] + GVL.r_InkMasterFactor);
+				IF (r_InkTrim[Index] < 0.0) THEN
+					r_InkTrim[Index] := 0.0;
+				END_IF
+				GVL.w_InkRampTrimAdjusted[Index] :=   REAL_TO_WORD(r_InkTrim[Index]);
+				//apply clamps
+				IF GVL.w_InkRampTrimAdjusted[Index] < GVL.mb_Output_Registers[GVL.INKMOTORCLAMPMIN] THEN
+					GVL.w_InkRampTrimAdjusted[Index] := GVL.mb_Output_Registers[GVL.INKMOTORCLAMPMIN]; 
+				END_IF
+				IF GVL.w_InkRampTrimAdjusted[Index] > GVL.mb_Output_Registers[GVL.INKMOTORCLAMPMAX] THEN
+					GVL.w_InkRampTrimAdjusted[Index] := GVL.mb_Output_Registers[GVL.INKMOTORCLAMPMAX]; 
+				END_IF
+				//apply to the current Ink trim value, after validate min and max trim values
+				IF( (GVL.w_InkRampTrimAdjusted[Index] < GVL.mb_Output_Registers[GVL.MINSWEEPTRIM]) OR (GVL.w_InkRampTrimAdjusted[Index] > GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM])) THEN
+					//bad Ink trim calc here
+					GVL.w_InkRampTrimAdjusted[Index] :=  GVL.w_LastSweepTrim[Index] ;
+				ELSE	
+					//GVL.mb_Output_Registers[GVL.SWEEPTRIM + (Index * GVL.WORDRUNTIMEGROUPSIZE)] :=  GVL.w_InkRampTrimAdjusted[Index] ;
+					IF (GVL.w_InkRampTrimAdjusted[Index] <> GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + (Index * GVL.WORDRUNTIMEGROUPSIZE)]) THEN
+						GVL.mb_Output_Coils[GVL.InkSweepRUN +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := TRUE;  			//  changing the Ink value now	if different				
+					END_IF
+				END_IF
+			END_IF			// if Ink function is auto, calc and adjust trim value
+		END_IF			//ftn enabled, ramping enabled, and ?
+	END_FOR		//ftn loop
+END_IF // not full init nor ramping init
+]]></ST>
+    </Implementation>
+    <LineIds Name="FBInkRamping">
+      <LineId Id="1423" Count="24" />
+      <LineId Id="1516" Count="0" />
+      <LineId Id="1523" Count="5" />
+      <LineId Id="1531" Count="0" />
+      <LineId Id="1529" Count="1" />
+      <LineId Id="1448" Count="14" />
+      <LineId Id="1466" Count="2" />
+      <LineId Id="1533" Count="2" />
+      <LineId Id="1532" Count="0" />
+      <LineId Id="49" Count="1" />
+      <LineId Id="2" Count="0" />
+      <LineId Id="52" Count="9" />
+      <LineId Id="1536" Count="0" />
+      <LineId Id="63" Count="1" />
+      <LineId Id="1584" Count="0" />
+      <LineId Id="1587" Count="0" />
+      <LineId Id="1586" Count="0" />
+      <LineId Id="66" Count="1" />
+      <LineId Id="1469" Count="0" />
+      <LineId Id="80" Count="1" />
+      <LineId Id="1537" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

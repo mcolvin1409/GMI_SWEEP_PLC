@@ -1,0 +1,83 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.6">
+  <POU Name="FProcessError" Id="{f6606173-48e3-453d-bb25-830548f8a9a2}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION FProcessError : BOOL
+VAR_INPUT
+
+///SDOC/////////////////////////////////////////////////////////////////////////
+//
+//  FProcessError.TcPOU      - Function - PLC error handling - AVT PLC 
+//
+//  Author:         Gary Stefancik                         Date: Aug 23, 2017
+//
+//	Beckhoff TC3 Structured Text for CX50x0 PLC
+//
+//	includes features:
+//		10 inker enables
+//		Ink ramping
+//		Water ramping
+//		Ink Surge
+//		Water Flood
+//		Ink Ducting (Hold Off)
+//		Ink Wash Up 
+//		Ink Function Control (Off/manual/auto)
+//		water Function Control (off/manual/auto)
+//		Inker positioner with feedback
+//		Water positioner with feedback
+//		Inker Analog Control
+//		water Analog Control
+//		Inker Positioner output cancel
+//		Water Positioner output cancel
+///////////////////////////////////////////////////////////////////////SDOCEND//
+
+	ErrorNumber :WORD;		//error code to be recorded in the error queue
+END_VAR
+VAR
+	// === LOCAL DATA === NOT saved over power cycles 
+
+	Register: WORD;
+
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[(************************************************************************************************
+ *
+ *   FUNCTION 	:FProcessError
+ *
+ *   Author		:	Gary Stefancik
+ *
+ *   Description:	Place error information into Modbus
+ *
+ *   Parameters	:	void
+ *
+ *   Returns	:	void	
+ *
+ *   History	:   12-Nov-17, GaryS Created
+ *				12-Dec-17	Mark C Removed the magic number with macros WI 143332
+ *
+************************************************************************************************)
+
+// Check if any of the 5 error registers is set to 0 and place error code within it and increment 
+//	error count.  If no registry is empty (set to zero) then just add error to error count.
+// assume the monitoring slave will read this count and queue array, then zero all values (count & array) in the PLC
+
+GVL.mb_Output_Registers[GVL.ERRORCOUNT]:= GVL.mb_Output_Registers[GVL.ERRORCOUNT] + 1;
+
+FOR Register:= GVL.ERRORREGISTER1 TO GVL.ERRORREGISTER5 DO
+	IF (GVL.mb_Output_Registers[Register] = 0) THEN
+		GVL.mb_Output_Registers[Register]:= ErrorNumber;
+		FProcessError:= TRUE;
+		RETURN;
+	END_IF
+END_FOR
+FProcessError:= FALSE;
+RETURN;]]></ST>
+    </Implementation>
+    <LineIds Name="FProcessError">
+      <LineId Id="133" Count="28" />
+      <LineId Id="7" Count="0" />
+      <LineId Id="33" Count="0" />
+      <LineId Id="2" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

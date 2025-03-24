@@ -1,0 +1,229 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.10">
+  <GVL Name="GVL" Id="{afe8b36f-4cd8-46e0-8082-f8a31100c722}">
+    <Declaration><![CDATA[{attribute 'qualified_only'}
+VAR_GLOBAL 
+
+///SDOC/////////////////////////////////////////////////////////////////////////
+//
+//  GVL.TcGVL      - Global Variable List - AVT PLC - Comexi Bridge - MODBUS to Profibus
+//
+//  Author:         Mark Colvin                         Date: Sept 5, 2018
+//
+//	Beckhoff TC3 Structured Text for CX8190 PLC
+//
+//	includes features:
+//		10 inker enables
+///////////////////////////////////////////////////////////////////////SDOCEND//
+
+
+
+CONSTANT 
+				//=== GLOBAL CONSTANT DATA ===
+	// --- INKER POSITIONER CONFIGURATION / TWEAK
+	W_FBTOLERANCE			:WORD:=1;	//FB positioner % tolerance - start to pulse positioner motor instead of 100% ON (1 to 15 %)
+	W_FBFLASHDELAY		:WORD:=200;	//FB positioner Flash delay cycle count (1ms per)
+	W_FBFLASHON			:WORD:=300;  //FB positioner Flash on time cycle count (1ms per)
+	//d_PRESSSPEEDMAX		:DINT:=7812500;  		// MAX DINT value
+	w_MAXFOUNTAINS		:WORD:= 	7;			// max number of fountains for indexes, includes 0
+//	r_INTPER1PERCENT	:REAL:= 327.67;
+	POSTIONER_TIMEOUT		:WORD:=4000;			//number of cycles for positioner failure
+	PULSE_WHEN_CLOSE_OPTION :BOOL:=TRUE;			//positioner will pulse to target if TRUE
+	SWPWTR_TIME			:WORD:=0;			//sweep/water hardware type - motor positioner without any feedback
+	SWPWTR_FB			:WORD:=1;			//sweep/water hardware type - motor positioner with analog feedback
+	SWPWTR_OUTPUT			:WORD:=2;			//sweep/water hardware type - analog output
+	SWPWTR_BRIDGE			:WORD:=3;			//sweep/water hardware type - Comexi Bridge
+	
+	MAXRAMPINGSPEEDDIVISIONS :WORD:=20;			//max speed divisions in ramping data
+//  CONFIGURATION CONSTANTS
+	b_DINTInput				:BOOL:= TRUE;	// TRUE means a double integer (x32) input is used for press speed, False means the input is integer	(x16)	
+											//  Represents part of a 0 to 32767 integer feedback code
+
+	
+	// Modbus Output Coils (BOOLEAN) - MACROS for address offsets, these are WORD types, because they are indexes to MODBUS arrays  ****
+	BOOLRUNTIMEGROUPSIZE	:WORD:=15;	//size of runtime group for boolean
+										//PLC control feature enables
+	INKRAMPINGENABLED		:WORD:=1;	//speed based trim adjust for all inkers, all fountains (auto)
+	WATERRAMPINGENABLED	:WORD:=2; 	//speed based trim adjust for water, all fountains (auto)
+	ENABLEINKINGHOLDOFF	:WORD:=3; 	//ductor control for all inkers
+	ENABLEINKSURGE	 	:WORD:=4;	//temporary ink surge operation
+	ENABLEWATERFLOOD		:WORD:=5;	//temporary water flood operation 
+	ENABLEINKERWASHUP		:WORD:=6;	//temporary inker wash-up operation
+	ENABLEINKSWEEPCONTROL	:WORD:=7;	//inker speed control (basic)
+	ENABLEWATERCONTROL	:WORD:=8;	//water speed control (basic)
+	ENABLEINKERFUNCTION	:WORD:=9;	//operator control of inker functions (off, manual, auto)
+	ENABLEWATERFUNCTION	:WORD:=10;	//operator control of water functions (off, manual, auto)
+	ENABLEINKOUTCANCEL	:WORD:=11;	//operator cancel control of inker positioners 		- not used
+	ENABLEWATEROUTCANCEL	:WORD:=12;	//operator cancel control of water positioners 		- not used
+	ENABLEFOUNTAIN		:WORD:=41;	//fountain enables to PLC (1st inker, up to 10 fountains)
+
+	ENABLEFULLINIT		:WORD:=21;	//config data on MODBUS addresses, load into PLC arrays and process
+
+										//slave commands to PLC and RUNTIME status from PLC
+	REALTIME_ADVANCE		:WORD:=31;	// advances (+) selected real-time selection of analog input/output
+	REALTIME_RETARD		:WORD:=32;	// retards  (-) selected real-time selection of analog input/output
+														// ----Runtime fountain data - MODBUS indexes 71 to     ---
+	PLCerrorLastRequestInk	:WORD:=75;	//PLC error detected during last INK move request, PLC to reset (1st inker)
+	InkSweepRUN			:WORD:=77;	//True to RUN ink positioner to curr trgt, PLC reset if reaches trgt or error (1st inker)
+	WtrControlRUN			:WORD:=78;	//True to RUN water positioner to curr trgt, PLC reset if reaches trgt or error (1st inker)
+	PLCerrorLastRequestWtr	:WORD:=79;	//PLC error detected during last INK move request, PLC to reset (1st inker)
+	Inker_RUNNING			:WORD:=84;	//True means the inker positioner motor is moving (to slave) (1st inker)
+	Water_RUNNING			:WORD:=85;	//True means the water positioner motor is moving (to slave) (1st inker)
+	
+	// Modbus Output Registers (WORD) - MACROS for address offsets, these are WORD types, because they are indexes to MODBUS arrays ****
+	WORDRUNTIMEGROUPSIZE	:WORD:=15;	//size of runtime group for registers
+										//PLC configuration data (single value for all inkers) - MODBUS indexes in constants
+	MINSWEEPTRIM			:WORD:=1;	//percentage, min ink trim
+	MAXSWEEPTRIM			:WORD:=2;	//percentage, max ink trim
+	MINWATERTRIM			:WORD:=3;	//percentage, min water trim
+	MAXWATERTRIM			:WORD:=4;	//percentage, max water trim
+	INKERHARDWARETYPE		:WORD:=20;	//inker positioners type (0=up/down, 1=up/down w/fb, 2=analog output (0-10 VDC), bridge to profibus
+    PLCVERSIONNUMBER		:WORD:=48;	//PLC image version
+    PLCMINORREVISION		:WORD:=49;	//PLC image minor revision, x100
+	ERRORREGISTER1 		:WORD:=50;	//PLC generated error code queue start
+	ERRORREGISTER5 		:WORD:=54;	//PLC generated error code queue end
+	ERRORCOUNT			:WORD:=55;	//PLC generated error code queue current error count
+	WATERHARDWARETYPE		:WORD:=60;	//water positioners type (0=up/down, 1=up/down w/FB, 2=analog output (0-10 VDC)
+	
+	SWEEPTRIM			:WORD:=61; 	//inker trim target from slave (1st inker)----Runtime fountain data - MODBUS indexes 61 to 210---
+	WATERTRIM			:WORD:=62; 	//water trim target from slave (1st fountain)
+	SWEEPTRIMONPRESS		:WORD:=74; 	//inker trim position from PLC (1st inker), from inker feedback voltage
+	WATERTRIMONPRESS		:WORD:=75; 	//water trim position from PLC (1st inker), from water feedback voltage
+
+	REALTIME_PLC_A2D		:WORD:=215;	//FSE tool for analog data checking (16bit value)
+	REALTIME_DATA_SELECTION :WORD:=216;	//Input selection index for providing source to REALTIME_PLC_A2D
+									//1 to 10: ink sweep; 11 to 20: water control; 21: press speed
+	
+	W_STATE				:WORD:=230;	//PLC state
+	// Error Codes
+	BADFEEDBACK			:WORD:=1;		//bad motor positioner feedback
+	BADMOTORDIRECTION		:WORD:=2;		//trying to go both ways on motor positioner
+	BADWTRMOTORDIRECTION	:WORD:=3;		//trying to go both ways on water positioner
+	INKPOSITCANCEL		:WORD:=4;		//both outputs on inker positioners cancelled by slave
+	WTRPOSITCANCEL		:WORD:=5;		//both outputs on water positioners cancelled by slave
+	MISSINGFBSIGNAL		:WORD:=6;		//inker FB signal is zero
+
+	
+END_VAR
+
+
+VAR_GLOBAL 
+	
+	
+
+END_VAR
+
+
+VAR_GLOBAL 
+PERSISTENT
+	// === GLOBAL DATA - STORED IN PLC HDD DURING PLC2 TASK ===
+// END CONFIGURATION
+	W_STATE2 				:ARRAY[0..w_MAXFOUNTAINS] OF WORD;	//checking last OP values (each fountain)
+	b_InkTrimMoving			:ARRAY[0..w_MAXFOUNTAINS] OF BOOL;  // Is the ink trim moving 		NOT USED
+	//ink and water trim setting save data, changed from temp operations.
+	w_LastSweepTrim			:ARRAY[0..w_MAXFOUNTAINS] OF WORD; 		// Last ink trim in  ink sweep/ramping, used to tell if new trim and we need to move
+	w_LastWaterTrim			:ARRAY[0..w_MAXFOUNTAINS] OF WORD; 		// Last water trim in water setting/ramping, used to tell if new trim and we need to move
+
+	w_WaterTrimOnPress2		:ARRAY[0..w_MAXFOUNTAINS] OF WORD;		// Used to restore previous water trim after power cycle
+	w_LastSweepOP			:ARRAY[0..w_MAXFOUNTAINS] OF WORD; 		// Last ink OP in  ink sweep adj, used to tell if OP moved
+	
+// Modbus registers and coils arrays for slave communications
+	mb_Input_Coils	    :ARRAY[0..254] OF BOOL;	// not used
+	mb_Input_Registers  	:ARRAY[0..254] OF WORD;	//not used
+	mb_Output_Coils 		:ARRAY[0..254] OF BOOL;	
+		//EnableInkRamping   	MBBI 1 	MBA 32771
+		//EnableWaterRamping 	MBBI 2	MBA 32772
+		//EnableInkingHoldOff	MBBI 3	MBA 32772
+		//EnableInkSurge	 	MBBI 4	MBA 32773
+		//EnableWaterFlood		MBBI 5	MBA 32774
+		//EnableInkerWashup		MBBI 6	MBA 32775
+		//EnableInkSweepControl	MBBI 7	MBA 32776
+		//EnableWaterControl	MBBI 8	MBA 32777
+		//EnableInkerFunction	MBBI 9	MBA 32778
+		//EnablewaterFunction	MBBI 10	MBA 32779
+		//EnableInkOutCancel	MBBI 11 MBA 32780
+		//EnablewaterOutCancel	MBBI 12	MBA 32781
+
+		//EnableFullInit		MBWI 21 MBA 032790 
+		//EnableRampInit		MBWI 22 MBA 032791 
+		//ImpressionOn		MBWI 23	MBA 032792 
+		//EnableFountain		MBBI 0-41-32810 1-42-32811 2-43-32812 3-44-32813 4-45-32814 5-46-32815 6-47-32816 7-47-32817 8-48-32818 9-49-32819
+		//CancelInkerPositioner	:BOOL;  // MBBI 0-71 1-86 2-101 3-116 4-131 5-146
+		//CancelWaterPositioner	:BOOL;	// MBBI 0-72 1-87 2-102 3-117 4-132 5-147
+		///Reserve				:BOOL;	// MBBI 0-73 1-88 2-103 3-118 4-133 5-148
+		///Reserve				:BOOL;  // MBBI 0-74 1-89 2-104 3-119 4-134 5-149
+		///Reserve				:BOOL;  // MBBI 0-75 1-90 2-105 3-120 4-135 5-150
+		//CancelInkSurge			:BOOL;  // MBBI 0-76 1-91 2-106 3-121 4-136 5-151
+		//Reserve				:BOOL;  // MBBI 0-77 1-92 2-107 3-122 4-137 5-152
+		//Reserve				:BOOL;  // MBBI 0-78 1-93 2-108 3-123 4-138 5-153
+		//ChangeWaterFunction		:BOOL;  // MBBI 0-79 1-94 2-109 3-124 4-139 5-154
+		//Reserve				:BOOL;	// MBBI 0-80 1-95 2-110 3-125 4-140 5-155
+		//CancelWaterFlood		:BOOL;  // MBBI 0-81 1-96 2-111 3-126 4-141 5-156
+		//InkWashUp 				:BOOL;  // MBBI 0-82 1-97 2-112 3-127 4-142 5-157
+		//Reserve1				:BOOL;  // MBBI 0-83 1-98 2-113 3-128 4-143 5-158
+		//Reserve2				:BOOL;  // MBBI 0-84 1-99 2-114 3-129 4-144 5-159
+		//Reserve3				:BOOL;  // MBBI 0-85 1-100 2-115 3-130 4-145 5-160
+	
+	mb_Output_Registers 	:ARRAY[0..254] OF WORD;	
+//		MinSweepTrim			MBA 32770 MBWI 1
+//		MaxSweepTrim			MBA 32771 MBWI 2
+//		MinWaterTrim			MBA 32772 MBWI 3
+//		MaxWaterTrim			MBA 32773 MBWI 4
+//		MaxInkSurgeTime		MBA 32774 MBWI 5
+//		MaxWaterFloodTime		MBA 32775 MBWI 6
+//		InkSurgeTrimSetting	MBA 32776 MBWI 7
+//		WaterFloodTrimSetting	MBA 32777 MBWI 8
+//		InkSurgeTimeIncrement	MBA 32778 MBWI 9   		In seconds	
+//		WaterFloodTimeIncrement	MBA 32779 MBWI 10  	In seconds
+//		InkMasterSetting		MBA 32780 MBWI 11   			
+//		WaterMasterSetting	MBA 32781 MBWI 12
+//		PressSpeedFPMMin		MBA 32782 MBWI 13	
+//		PressSpeedFPMMax		MBA 32783 MBWI 14
+//		InkTrimInfluence		MBA 32784 MBWI 15
+//		WaterTrimInfluence	MBA 32785 MBWI 16
+//		InkMasterInfluence	MBA 32786 MBWI 17
+//		WaterMasterInfluence	MBA 32787 MBWI 18
+//		RampingSpeedDivisions	MBA 32788 MBWI 19
+//		INKERHARDWARETYPE		MBA 32789 MWSI 20	//inker positioners type (0=up/down, 1=up/down w/fb, 2=analog output (0-10 VDC)
+//		w_RanpingSpeedFPM		MBA 32790 MSWI 21 -40
+//		PressSpeedFPM			MBA	32810 MBWI 41
+//      PressSpeedVoltageMin	MBA	32811 MBWI 42
+//      PressSpeedVoltageMax	MBA	32812 MBWI 43
+//      Ductor Hold Off 0 		MBA	32813 MBWI 44
+//      Ductor Hold Off 1		MBA	32814 MBWI 45
+//      Ductor Hold Off 2 		MBA	32815 MBWI 46
+//      Ductor Hold Off 3 		MBA	32816 MBWI 47
+//      PLC version number		MBA	32817 MBWI 48
+//      PLC minor revision		MBA	32818 MBWI 49
+//		PLC error code1		MBA 32819 MBWI 50  
+//		PLC error code2		MBA 32820 MBWI 51  
+//		PLC error code3		MBA 32821 MBWI 52  
+//		PLC error code4		MBA 32822 MBWI 53  
+//		PLC error code5		MBA 32823 MBWI 54 
+//		PLC error count 		MBA 32824 MBWI 55
+//		SPEEDINFLUENCE		MBA 32825 MBWI 56;	//percentage in ramping calcs
+//		BASECURVEMAX			MBA 32826 MBWI 57;	//percentage in ramping calcs
+//		MOTORCLAMPMIN			MBA 32827 MBWI 58;	//percentage in ramping calcs
+//		MOTORCLAMPMAX			MBA 32828 MBWI 59;	//percentage in ramping calcs
+//		WATERHARDWARETYPE		MBA 32829 MBWI 60;	//water positioner type (0=up/down, 1=up/down w/fb, 2=analog output (0-10 VDC)
+//		SweepTrim			MBWI 0-61 1-76 2-81 3-96 4-96 5-111  MBA 0-32830 1-32836 2-32843 3-32849 4-32849  5-32855  	
+//		WaterTrim			MBWI 0-62 1-77 2-82 3-97 4-97 5-112  MBA 0-32831 1-32837 2-32844 3-32850 4-413026 5-32856 	
+//      InkSurgeTim			MBWI 0-63 1-78 2-83 3-98 4-98 5-113
+//		WaterFloodTime		MBWI 0-64 1-79 2-84 3-99 4-99 5-114  MBA 0-32833 1-32839 2-32845 3-32851 4-413027 5-32857
+//		InkFunctSetting		MBWI 0-65 1-80 2-85 3-100 4-100 5-115  MBA 0-32834 1-32840 2-32846 3-32852 4-413028 5-32858
+//		WaterFunctSetting		MBWI 0-66 1-71 2-86 3-101 4-101 5-116  MBA 0-32841 1-32841 2-32847 3-32853 4-413029 5-32859
+//		InkDuctorValue		MBWI 0-67 1-72 2-87 3-102 4-102 5-117  MBA 0-32842 1-32842 2-32848 3-32854 4-413029 5-32860							
+//      Ink Surge Countdown		MBWI 0-68 1-73 2-88 3-103 4-103	5-118
+//		Water Flood Countdown	MBWI 0-69 1-74 2-89 3-104 4-104 5-119
+//		Ink Input Voltage Min	MBWI 0-70 1-75 2-90 3-105 4-105 5-120
+//		Ink Input Voltage Max 	MBWI 0-71 1-76 2-91 3-106 4-106 5-121
+//		Water Output Voltage Min MBWI 0-72 1-77 2-92 3-107 4-107 5-122
+//		Water Output Voltage Max MBWI 0-73 1-78 2-93 3-108 4-108 5-123
+//		SweepTrimOnpress		MBWI 0-74 1-79 2-94 3-109 4-109 5-124
+//		WaterTrimOnpress		MBWI 0-75 1-80 2-95 3-110 4-110v5-125
+	
+END_VAR
+
+]]></Declaration>
+  </GVL>
+</TcPlcObject>

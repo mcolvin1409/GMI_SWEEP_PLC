@@ -1,0 +1,130 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.6">
+  <POU Name="FBRampCalc" Id="{1d2cfd93-45f6-4deb-9a5f-221e74e9bcb0}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FBRampCalc
+///SDOC/////////////////////////////////////////////////////////////////////////
+//
+//  FBRampCalc.TcPOU      - Function Block - Initializing Ink Sweep and Water Control ramp curve data  - AVT PLC 
+//						Version 1
+//  Author:         Mark Colvin                         Date: Apr 20, 2018
+//
+//	Beckhoff TC3 Structured Text for CX50x0 PLC
+//
+//	includes features:
+//		10 inker enables
+//		Ink ramping
+//		Water ramping
+//		Ink Surge
+//		Water Flood
+//		Ink Ducting (Hold Off)
+//		Ink Wash Up 
+//		Ink Function Control (Off/manual/auto)
+//		water Function Control (off/manual/auto)
+//		Inker positioner with feedback
+//		Water positioner with feedback
+//		Inker Analog Control
+//		water Analog Control
+//		Inker Positioner output cancel
+//		Water Positioner output cancel
+//		Error logging
+//		Analog Calibration - Real-time Support
+//		Plate register support
+///////////////////////////////////////////////////////////////////////SDOCEND//
+
+VAR_INPUT
+END_VAR
+VAR_OUTPUT
+END_VAR
+VAR
+	// === LOCAL DATA === NOT saved over power cycles
+
+	Index								:WORD;			// temp word for loop 
+	w_InkMasterSetting					:WORD;			// one Master setting for Ink Feed
+	w_WaterMasterSetting					:WORD;			// one Master Setting for water control
+	w_InkMasterInfluence					:WORD;			// one Master influence for Ink Feed
+	w_WaterMasterInfluence					:WORD;			// one Master influence for water control
+	w_InkSpeedInfluence					:WORD;			// one Speed influence for Ink Feed
+	w_WaterSpeedInfluence					:WORD;			// one Speed influence for water control
+	w_InkBaseCurveMax						:WORD;			// one Base Curve Max for Ink Feed
+	w_WaterBaseCurveMax					:WORD;			// one Base Curve Max for water control
+	w_InkMotorClampMin					:WORD;			// one Motor Clamp Min for Ink Feed
+	w_WaterMotorClampMin					:WORD;			// one Motor Clamp Min for water control
+	w_InkMotorClampMax					:WORD;			// one Motor Clamp Max for Ink Feed
+	w_WaterMotorClampMax					:WORD;			// one Motor Clamp Max for water control
+	w_BoundaryIncrement					:WORD;			//temp word for boundary calc
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[
+//
+// this function block calculates the static data for ramping curves in the master settings and curve data portions:
+//			GVL.r_InkMasterFactor
+//			GVL.r_WaterMasterFactor
+//			GVL.w_SpeedBoundaries[Index]
+// the trim settings and influence data should calc'd during runtime, as trim setting changes by operator.
+// this calculation should occur after any changes to ramping curve data for the app server
+//
+(* -- put macro copies here
+	GVL.mb_Output_Coils[GVL.ENABLEFULLINIT]
+	GVL.mb_Output_Registers[GVL.w_STATE]
+	INKRAMPINGENABLED
+	WATERRAMPINGENABLED
+	INKMASTERSETTING
+	WATERMASTERSETTING
+	INKMASTERINFLUENCE
+	WATERMASTERINFLUENCE
+	RAMPINGSPEEDDIVISIONS
+	INKSPEEDINFLUENCE
+	INKBASECURVEMAX
+	INKMOTORCLAMPMIN
+	INKMOTORCLAMPMAX
+	WTRSPEEDINFLUENCE
+	WTRBASECURVEMAX	
+	WTRMOTORCLAMPMIN	
+	WTRMOTORCLAMPMAX	
+	PRESSSPEEDFPMMIN
+	PRESSSPEEDFPMMAX
+*)
+	w_InkMasterSetting := GVL.mb_Output_Registers[GVL.INKMASTERSETTING];			// one Master setting (%) for Ink Feed
+	w_WaterMasterSetting := GVL.mb_Output_Registers[GVL.WATERMASTERSETTING];			// one Master Setting (%) for water control
+	w_InkMasterInfluence := GVL.mb_Output_Registers[GVL.INKMASTERINFLUENCE];			// one Master influence (%) for Ink Feed
+	w_WaterMasterInfluence := GVL.mb_Output_Registers[GVL.WATERMASTERINFLUENCE];		// one Master influence (%) for water control
+	w_InkSpeedInfluence := GVL.mb_Output_Registers[GVL.INKSPEEDINFLUENCE];			// one Speed influence (%) for Ink Feed
+	w_WaterSpeedInfluence := GVL.mb_Output_Registers[GVL.WTRSPEEDINFLUENCE];			// one Speed influence (%) for water control
+	w_InkBaseCurveMax := GVL.mb_Output_Registers[GVL.INKBASECURVEMAX];				// one Base Curve Max (%) for Ink Feed
+	w_WaterBaseCurveMax := GVL.mb_Output_Registers[GVL.WTRBASECURVEMAX];			// one Base Curve Max (%) for water control
+	w_InkMotorClampMin := GVL.mb_Output_Registers[GVL.INKMOTORCLAMPMIN];			// one Motor Clamp Min (%) for Ink Feed
+	w_WaterMotorClampMin := GVL.mb_Output_Registers[GVL.WTRMOTORCLAMPMIN];			// one Motor Clamp Min (%) for water control
+	w_InkMotorClampMax := GVL.mb_Output_Registers[GVL.INKMOTORCLAMPMAX];			// one Motor Clamp Max (%) for Ink Feed
+	w_WaterMotorClampMax := GVL.mb_Output_Registers[GVL.WTRMOTORCLAMPMAX];			// one Motor Clamp Max (%) for water control
+
+	// calc the Master Factor percentage for both Ink and Water - part of the ramping correction
+	GVL.r_InkMasterFactor := (WORD_TO_REAL(w_InkMasterSetting) - 50.0) / (50.0 / WORD_TO_REAL(w_InkMasterInfluence));
+	GVL.r_WaterMasterFactor := (WORD_TO_REAL(w_WaterMasterSetting) - 50.0) / (50.0 / WORD_TO_REAL(w_WaterMasterInfluence));
+
+	//create speed boundaries - need this data for determining what index of ramping curve data for the current press speed
+	GVL.w_SpeedBoundaries[0] := GVL.mb_Output_Registers[GVL.PRESSSPEEDFPMMIN];						// first index, lowest speed
+	w_BoundaryIncrement := (GVL.mb_Output_Registers[GVL.PRESSSPEEDFPMMAX] - GVL.w_SpeedBoundaries[0] / 
+									(GVL.mb_Output_Registers[GVL.RAMPINGSPEEDDIVISIONS] - 1));		//constant increment
+	FOR Index := 1 TO GVL.mb_Output_Registers[GVL.RAMPINGSPEEDDIVISIONS]-1 DO
+		GVL.w_SpeedBoundaries[Index] := w_BoundaryIncrement + GVL.w_SpeedBoundaries[Index-1];  //keep adding increment to each boundary index
+	END_FOR
+	
+	//Adjustments are user curve data differences from base, what is the data from app_server? - User Curve data created by client ramping adjustment display (as displayed, not corrected in anyway)
+	// no need for adjustment data to be calc'd here , only needed to compare the normal curve, according to ramping configuration, to user adjusted curve.
+
+	//ramping adjustment to sweep and water control is set according to speed boundary of the current press speed and this result: user curve + trim factor % + master factor %
+	// trim factor percentage is calc'd on runtime because it needs the current trim value.
+	
+
+// --- end of ramping calculations --
+	  ]]></ST>
+    </Implementation>
+    <LineIds Name="FBRampCalc">
+      <LineId Id="9" Count="0" />
+      <LineId Id="4" Count="4" />
+      <LineId Id="78" Count="0" />
+      <LineId Id="10" Count="56" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

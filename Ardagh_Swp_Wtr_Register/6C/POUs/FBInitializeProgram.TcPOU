@@ -1,0 +1,384 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.10">
+  <POU Name="FBInitializeProgram" Id="{9dcd6240-f38a-483a-8e3d-e269b4ad0731}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FBInitializeProgram
+
+///SDOC/////////////////////////////////////////////////////////////////////////
+//
+//  FBInitializeProgram.TcPOU      - Function Block - PLC initialization of arrays from MODBUS and calibration calcs - AVT PLC 
+//
+//  Author:         Gary Stefancik                         Date: Aug 23, 2017
+//
+//	Beckhoff TC3 Structured Text for CX50x0 PLC
+//
+//	includes features:
+//		10 inker enables
+//		Ink ramping
+//		Water ramping
+//		Ink Surge
+//		Water Flood
+//		Ink Ducting (Hold Off)
+//		Ink Wash Up 
+//		Ink Function Control (Off/manual/auto)
+//		water Function Control (off/manual/auto)
+//		Inker positioner with feedback
+//		Water positioner with feedback
+//		Inker Analog Control
+//		water Analog Control
+//		Inker Positioner output cancel
+//		Water Positioner output cancel
+///////////////////////////////////////////////////////////////////////SDOCEND//
+
+VAR_INPUT	
+END_VAR
+VAR_OUTPUT
+END_VAR
+VAR
+		
+CONSTANT
+		d_1VOLTTODINT			:DINT:= 781250;  // 1 volt = 10% of DINT = 781250  (24 bit)
+		r_1VOLTTOINT			:REAL:= 3276.7;  //	1 volt = 10% of INT = 32767 (16 bit), assuming 0 to 10.0 VDC is input range of positioner feedback/DtoA output
+		
+END_VAR
+
+VAR
+	// === LOCAL DATA === NOT saved over power cycles
+	d_PressSpeedIntSpread		:DINT;
+	Index					:WORD;								// temp word for loop fountain index
+	Index_offset			:WORD;								//index offset to runtime data for fountains 7 to 10; 0 or 220
+	r_PressSpeedDintMax		:REAL;
+	r_PressSpeedIntMax		:REAL;
+	
+	r_PressSpeedVoltageMax		:REAL;
+	r_PressSpeedVoltageMin		:REAL;
+	r_OutVolt				:REAL;
+	r_InkInputMinVoltage		:ARRAY[0..GVL.w_MAXFOUNTAINS] OF REAL;
+	r_InkInputMaxVoltage		:ARRAY[0..GVL.w_MAXFOUNTAINS] OF REAL;	
+	r_InkInputIntMax			:ARRAY[0..GVL.w_MAXFOUNTAINS] OF REAL;
+	r_TargetWaterTrim			:ARRAY[0..GVL.w_MAXFOUNTAINS] OF REAL;
+	
+	w_InkInputIntSpread		:ARRAY[0..GVL.w_MAXFOUNTAINS] OF WORD;
+	r_PressSpeedIntSpread		:REAL;
+	r_WaterOutputMinVoltage	:ARRAY[0..GVL.w_MAXFOUNTAINS] OF REAL;
+	r_WaterOutputMaxVoltage	:ARRAY[0..GVL.w_MAXFOUNTAINS] OF REAL; 
+	r_WaterOutputIntMax		:ARRAY[0..GVL.w_MAXFOUNTAINS] OF REAL;
+	w_WaterOutputMaxIntSpread	:ARRAY[0..GVL.w_MAXFOUNTAINS] OF WORD;
+	
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[(************************************************************************************************
+ *
+ *   FUNCTION BLOCK	:FBInitializeProgram
+ *
+ *   Author		:	Gary Stefancik
+ *
+ *   Description:	Initializes PLC.  Performs one time press speed calculations as well as calibrate 
+ *					hardware inputs and outputs
+ *
+ *   Parameters	:	void
+ *
+ *   Returns	:	void	
+ *
+ *   History	:   29-Oct-17, GaryS Created
+ *				12-Dec-17	Mark C Removed the magic number with macros WI 143332
+ *		2.08		16-Feb-18	Mark C - fixed calibration voltages of ink and water from MB data. 
+ *2.10 to 2.14 -saw that this Function Block does not calc the GVL or local variables unless INIT by App Server TWICE with exe restarts. not sure why?
+ *4.6 Nov 28, 2018 Mark C - always initialize the press speed and impression size
+***************************************************************************************************)
+	GVL.mb_Output_Registers[GVL.w_STATE] := GVL.mb_Output_Registers[GVL.w_STATE]+1;
+
+//IF (GVL.mb_Output_Coils[GVL.INKRAMPINGENABLED] OR GVL.mb_Output_Coils[GVL.WATERRAMPINGENABLED]) THEN   //if either ramping option enabled, init press speed data
+//always init press speed and impression size.
+	// Get press speed
+		r_PressSpeedVoltageMin:= WORD_TO_REAL(GVL.mb_Output_Registers[GVL.PRESSSPEEDVOLTAGEMIN]) * 0.001; 	//voltage is sent 0.0 to 10.0, as WORD as voltage x 1000 
+		r_PressSpeedVoltageMax:= WORD_TO_REAL(GVL.mb_Output_Registers[GVL.PRESSSPEEDVOLTAGEMAX]) * 0.001;
+		// If r_PressSpeedVoltageMax is 0 then substitute d_DINT10V.
+		IF (r_PressSpeedVoltageMax = 0.0) THEN
+			r_PressSpeedVoltageMax:= 10.0; // Set to 10 if no data provided
+		END_IF	
+
+	IF (GVL.b_DINTInput = TRUE) THEN	// EL3751 DINT is used for press speed	(32 bit)-2147483648 to 2147483647
+									// The measurement at the differential input channel is digitised with a resolution of 24 bit and 10 ksps 
+									// 1-channel analog input, high-precision, parameterisable, 24 bit, 10 kSps, differential, oversampling, with calibration certificate
+		GVL.r_PressSpeedDintMin:= DINT_TO_REAL(d_1VOLTTODINT) *  r_PressSpeedVoltageMin;
+		r_PressSpeedDintMax:= DINT_TO_REAL(d_1VOLTTODINT) *  r_PressSpeedVoltageMax;
+
+		d_PressSpeedIntSpread:=  REAL_TO_DINT(r_PressSpeedDintMax - GVL.r_PressSpeedDintMin);
+		
+		// Do one-time calculations for press speed 
+		GVL.d_PressSpeedFPMSpread:=	WORD_TO_DINT(GVL.mb_Output_Registers[GVL.PRESSSPEEDFPMMAX]); 
+		IF (GVL.d_PressSpeedFPMSpread > 0) THEN // Avoid divide by 0
+				GVL.d_TicksPerFoot:= d_PressSpeedIntSpread / GVL.d_PressSpeedFPMSpread; 
+		ELSE
+			// no max press FPM in Modbus data
+				GVL.i_TicksPerFoot:= 1; //default value
+		END_IF
+	ELSE // INT is used as press speed  (16 bit) 	-32768 to 32767
+
+		GVL.r_PressSpeedIntMin:= r_1VOLTTOINT * r_PressSpeedVoltageMin;
+		r_PressSpeedIntMax:= r_1VOLTTOINT *  r_PressSpeedVoltageMax;
+
+		r_PressSpeedIntSpread:=  r_PressSpeedIntMax - GVL.r_PressSpeedIntMin;
+		
+		// Do one time calculations for press speed 
+		GVL.r_PressSpeedFPMSpread:=	WORD_TO_REAL(GVL.mb_Output_Registers[GVL.PRESSSPEEDFPMMAX]); 
+		IF (GVL.r_PressSpeedFPMSpread > 0.0) THEN // Avoid divide by 0
+				GVL.i_TicksPerFoot:= REAL_TO_INT(r_PressSpeedIntSpread / GVL.r_PressSpeedFPMSpread); 
+		ELSE
+			// no max press FPM in Modbus data
+				GVL.i_TicksPerFoot:= 1; //default value
+		END_IF
+
+	END_IF
+//END_IF
+	GVL.mb_Output_Registers[GVL.w_STATE] := GVL.mb_Output_Registers[GVL.w_STATE]+1;
+
+IF (GVL.mb_Output_Coils[GVL.ENABLEINKSWEEPCONTROL]) THEN   //if ink sweep option enabled, init inker positioner calibration voltages
+
+	//  Calibrate Inker Input Feedback Global variables
+	// inputs are INKINPUTVOLTAGEMIN[], INKINPUTVOLTAGEMAX[]
+	// these Global Variables are configured:  w_InkInputIntMin[], w_InkInputIntMax[], r_InkInput1PercentInt[]
+	// Conversion time	typ. 300..700 µs, depending on settings
+	//					Default: approx. 500 µs (5 channels, filter deactivated)
+	//Resolution			16 bits (including sign)
+	FOR Index:= 0 TO GVL.w_MAXFOUNTAINS DO		//ALL Fountains are configured
+		//assume that 0 to 32767 AtoD ticks is 0.000 to 10.000 VDC 
+		//Index := 5;  //debug a single fountain, one at a time, 0 to max-1
+		Index_offset := 0;		//ftns 1 to 6, WORDRUNTIME only
+		IF( Index > 5 )THEN
+			Index_offset := GVL.SWPWTR_7_10_FTN_OFFSET;	//ftns 7 to 10, WORDRUNTIME only
+		END_IF	
+		GVL.mb_Output_Coils[GVL.InkSweep_OFF2+(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;
+		GVL.mb_Output_Coils[GVL.PLCerrorLastRequestInk+(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;	// reset bool to show AS no longer in error condition
+		GVL.w_PreviousInkTrimSurge[Index] := 0;		// Used to restore previous ink trim during Surge	
+		GVL.w_PreviousInkTrimOff[Index] := 0;		// Used to restore previous ink trim during Function OFF 
+		GVL.w_PreviousInkTrimAuto[Index] := 0;		// Used to restore previous ink trim during function changes (Auto/Manual)
+		r_InkInputMinVoltage[Index]:= WORD_TO_REAL(GVL.mb_Output_Registers[GVL.INKINPUTVOLTAGEMIN + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]) * 0.001; //convert INTx1000 to real voltage (min)
+		r_InkInputMaxVoltage[Index]:= WORD_TO_REAL(GVL.mb_Output_Registers[GVL.INKINPUTVOLTAGEMAX + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]) * 0.001; //convert INTx1000 to real voltage (max)
+		IF (r_InkInputMaxVoltage[Index] = 0.0) THEN
+			r_InkInputMaxVoltage[Index]:= 10.0; 			// set to 10 if no data provided for max voltage allowed
+		END_IF
+		GVL.w_InkInputIntMin[Index]:= REAL_TO_WORD(r_1VOLTTOINT * r_InkInputMinVoltage[Index]);		// get the AtoD ticks  value for min volts
+		GVL.w_InkInputIntMax[Index]:= REAL_TO_WORD(r_1VOLTTOINT * r_InkInputMaxVoltage[Index]);		// get the AtoD ticks value  for max volts
+		w_InkInputIntSpread[Index]:= GVL.w_InkInputIntMax[Index] - GVL.w_InkInputIntMin[Index];		// get the AtoD ticks spread for operating range
+		GVL.r_InkInput1PercentInt[Index]:= WORD_TO_REAL(w_InkInputIntSpread[Index]) / 100.0;			//calc the 1 percent AtoD tick value using the operating range 
+		GVL.r_InkOutputMax1PercentInt[Index]:= WORD_TO_REAL(w_InkInputIntSpread[Index]) / 100.0;		//calc the 1 percent AtoD tick value using the operating range 
+
+		IF( GVL.mb_Output_Coils[GVL.ENABLEINKFUNCTION] = FALSE ) THEN					//if inker function not enabled, reset these items:
+			GVL.mb_Output_Registers[GVL.INKFUNCTSETTING + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] := GVL.MANUAL_FUNCTION;  //function setting to manual
+			GVL.mb_Output_Coils[GVL.InkSweep_OFF+(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;										// clear OFF bool
+			GVL.mb_Output_Coils[GVL.InkSweep_OFF2+(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;										// clear OFF2 bool
+		END_IF
+
+		IF( GVL.mb_Output_Coils[GVL.ENABLEINKSURGE] = FALSE ) THEN					//if inker surge not enabled, reset these items:
+			GVL.mb_Output_Registers[GVL.INKSURGETIME + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] := 0;  //surge time to zero
+			GVL.mb_Output_Coils[GVL.CANCELINKSURGE+(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;										// clear surge bool
+		END_IF
+
+		IF( GVL.mb_Output_Coils[GVL.ENABLEINKERWASHUP] = FALSE ) THEN					//if inker washup not enabled, reset these items:
+			GVL.mb_Output_Coils[GVL.INKWASHUP+(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;										// clear washup bool
+		END_IF
+
+	END_FOR
+ELSE
+	FOR Index:= 0 TO GVL.w_MAXFOUNTAINS DO		//ALL Fountains are configured - NO INKER SWEEP CONTROL
+		//assume that 0 to 32767 AtoD ticks is 0.000 to 10.000 VDC 
+		//Index := 5;  //debug a single fountain, one at a time, 0 to max-1
+		Index_offset := 0;		//ftns 1 to 6, WORDRUNTIME only
+		IF( Index > 5 )THEN
+			Index_offset := GVL.SWPWTR_7_10_FTN_OFFSET;	//ftns 7 to 10, WORDRUNTIME only
+		END_IF	
+		IF( GVL.mb_Output_Coils[GVL.ENABLEINKSWEEPCONTROL] = FALSE ) THEN					//if inker sweep not enabled, reset these items:
+			GVL.mb_Output_Registers[GVL.SWEEPTRIM + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] := 0;  			//inker trim position to zero
+			GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] := 0;  	//inker on-press position to zero
+			GVL.mb_Output_Coils[GVL.CancelInkerPositioner+(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;				// clear inker positioner bool
+			GVL.mb_Output_Coils[GVL.PLCerrorLastRequestInk+(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;			// clear inker error bool
+			GVL.mb_Output_Coils[GVL.InkSweepRUN+(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;						// clear inker run bool
+			GVL.mb_Output_Coils[GVL.Inker_RUNNING+(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;						// clear inker running bool
+			GVL.mb_Output_Registers[GVL.INKFUNCTSETTING + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] := GVL.MANUAL_FUNCTION;  //function setting to manual
+			GVL.mb_Output_Coils[GVL.InkSweep_OFF+(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;										// clear OFF bool
+			GVL.mb_Output_Coils[GVL.InkSweep_OFF2+(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;										// clear OFF2 bool
+			GVL.mb_Output_Registers[GVL.INKSURGETIME + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] := 0;  //surge time to zero
+			GVL.mb_Output_Coils[GVL.CANCELINKSURGE+(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;										// clear surge bool
+			GVL.mb_Output_Coils[GVL.INKWASHUP+(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;										// clear washup bool
+		END_IF
+
+	END_FOR
+	
+END_IF
+	GVL.mb_Output_Registers[GVL.w_STATE] := GVL.mb_Output_Registers[GVL.w_STATE]+1;
+
+IF (GVL.mb_Output_Coils[GVL.ENABLEWATERCONTROL]) THEN   //if water control option enabled, init water positioner/output calibration voltages
+	//  Calibrate WaterOutput Global variables
+	// inputs are WATEROUTPUTVOLTAGEMIN[], WATEROUTPUTVOLTAGEMAX[], 
+	// these Global variables are configured: w_WaterOutputIntMin[], r_WaterOutputMax1PercentInt[]
+	FOR Index:= 0 TO GVL.w_MAXFOUNTAINS DO			//ALL Fountains are configured
+		//assume that 0 to 32767 AtoD ticks is 0.000 to 10.000 VDC
+		//Index := 0;   //debug ftn loop
+		Index_offset := 0;		//ftns 1 to 6, WORDRUNTIME only
+		IF( Index > 5 )THEN
+			Index_offset := GVL.SWPWTR_7_10_FTN_OFFSET;	//ftns 7 to 10, WORDRUNTIME only
+		END_IF	
+		GVL.mb_Output_Coils[GVL.WtrControl_OFF2+(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;
+		GVL.mb_Output_Coils[GVL.PLCerrorLastRequestWtr +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;  // no water error
+		GVL.w_PreviousWaterTrimFlood[Index] := 0;		// Used to restore previous water trim during Flood
+		GVL.w_PreviousWaterTrimOff[Index] := 0;		// Used to restore previous water trim during Function OFF 
+		GVL.w_PreviouswaterTrimAuto[Index] := 0;		// Used to restore previous water trim during function changes (Auto/Manual)
+		r_WaterOutputMinVoltage[Index]:= WORD_TO_REAL(GVL.mb_Output_Registers[GVL.WATEROUTPUTVOLTAGEMIN + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]) * 0.001; //convert INTx1000 to real voltage (min)
+		r_WaterOutputMaxVoltage[Index]:= WORD_TO_REAL(GVL.mb_Output_Registers[GVL.WATEROUTPUTVOLTAGEMAX + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]) * 0.001; //convert INTx1000 to real voltage (max)
+		IF (r_WaterOutputMaxVoltage[Index] = 0.0) THEN
+			r_WaterOutputMaxVoltage[Index]:= 10.0; 			// set to 10 if no data provided for max voltage allowed
+		END_IF
+		GVL.w_WaterOutputIntMin[Index]:= REAL_TO_WORD(r_1VOLTTOINT * r_WaterOutputMinVoltage[Index]);			// get the AtoD ticks  value for min volts
+		GVL.w_WaterOutputIntMax[Index]:= REAL_TO_WORD(r_1VOLTTOINT * r_WaterOutputMaxVoltage[Index]);			// get the AtoD ticks value  for max volts
+		w_WaterOutputMaxIntSpread[Index]:= GVL.w_WaterOutputIntMax[Index] - GVL.w_WaterOutputIntMin[Index];		// get the AtoD ticks spread for operating range
+		
+		GVL.r_WaterOutputMax1PercentInt[Index]:= WORD_TO_REAL(w_WaterOutputMaxIntSpread[Index]) / 100.0;		//calc the 1 percent AtoD tick value using the operating range
+		GVL.r_WaterOutput1PercentInt[Index]:= WORD_TO_REAL(w_WaterOutputMaxIntSpread[Index]) / 100.0;		//calc the 1 percent AtoD tick value using the operating range
+
+		IF( GVL.mb_Output_Coils[GVL.ENABLEWATERFUNCTION] = FALSE ) THEN					//if water function not enabled, reset these items:
+			GVL.mb_Output_Registers[GVL.WATERFUNCTSETTING + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] := GVL.MANUAL_FUNCTION;  //function setting to manual
+			GVL.mb_Output_Coils[GVL.WtrControl_OFF+(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;										// clear OFF bool
+			GVL.mb_Output_Coils[GVL.WtrControl_OFF2+(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;										// clear OFF2 bool
+		END_IF
+
+		IF( GVL.mb_Output_Coils[GVL.ENABLEWATERFLOOD] = FALSE ) THEN					//if water flood not enabled, reset these items:
+			GVL.mb_Output_Registers[GVL.WATERFLOODTIME + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] := 0;  //flood time to zero
+			GVL.mb_Output_Coils[GVL.CANCELWATERFLOOD+(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;										// clear flood bool
+		END_IF
+
+		//check the water HW type for output, then set the WATER output I/O registers from the on-press value
+// WARNING - the hardware voltage levels which are OUTPUT are set to ZERO on power cycles. Stand alone PLC operation will not engage this initialization code
+// without some help. Normally, this would be startup of the Mercury App Server, which will set the GVL.ENABLEFULLINIT boolean.
+// However, just PLC starting up ONLY will NOT cause this part of the PLC code to execute.
+// We have to have some way detecting the PLC power failure state.
+
+		IF (GVL.mb_Output_Registers[GVL.WATERHARDWARETYPE] = GVL.SWPWTR_OUTPUT) THEN
+//			IF ( GVL_IO.WaterSweepOut[Index] <= WORD_TO_INT(GVL.w_WaterOutputIntMin[Index])) THEN
+				IF( GVL.mb_Output_Registers[GVL.w_STATE] < 10 ) THEN
+					ADSLOGDINT( msgCtrlMask := ADSLOG_MSGTYPE_LOG, msgFmtStr := 'Init-Water trim: %d', dintArg:=  GVL.mb_Output_Registers[GVL.WATERTRIMONPRESS + (Index * GVL.WORDRUNTIMEGROUPSIZE)]);
+				END_IF
+				r_TargetWaterTrim[Index]:= WORD_TO_REAL(GVL.mb_Output_Registers[GVL.WATERTRIMONPRESS + (Index * GVL.WORDRUNTIMEGROUPSIZE)]);  //WATERTRIMONPRESS does not save???
+				r_TargetWaterTrim[Index]:= WORD_TO_REAL(GVL.w_WaterTrimOnPress2[Index]);  //force the backup OP value
+				r_OutVolt:= (GVL.r_WaterOutputMax1PercentInt[Index]  * r_TargetWaterTrim[Index]) + GVL.w_WaterOutputIntMin[Index]; // Output voltage range is 0-32767, find a value that matches the percent trim
+				GVL_IO.WaterSweepOut[Index]:= REAL_TO_INT(r_OutVolt);  // Set the output voltage)
+//		this will make the WATER output match the WATERTRIM values, for now let's just use the last WATERONPRESS values to set output I/O
+//				GVL.mb_Output_Coils[GVL.WtrControlRUN +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := TRUE;
+//				GVL.mb_Output_Registers[GVL.WATERTRIM + (Index * GVL.WORDRUNTIMEGROUPSIZE)] := GVL.w_WaterTrimOnPress2[Index];
+//			END_IF
+		END_IF
+	END_FOR	
+ELSE
+	FOR Index:= 0 TO GVL.w_MAXFOUNTAINS DO		//ALL Fountains are configured - NO WATER CONTROL
+		//assume that 0 to 32767 AtoD ticks is 0.000 to 10.000 VDC 
+		//Index := 5;  //debug a single fountain, one at a time, 0 to max-1
+		Index_offset := 0;		//ftns 1 to 6, WORDRUNTIME only
+		IF( Index > 5 )THEN
+			Index_offset := GVL.SWPWTR_7_10_FTN_OFFSET;	//ftns 7 to 10, WORDRUNTIME only
+		END_IF	
+		IF( GVL.mb_Output_Coils[GVL.ENABLEWATERCONTROL] = FALSE ) THEN					//if water control not enabled, reset these items:
+			GVL.mb_Output_Registers[GVL.WATERTRIM + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] := 0;  			//water trim position to zero
+			GVL.mb_Output_Registers[GVL.WATERTRIMONPRESS + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] := 0;  	//water on-press position to zero
+			GVL.mb_Output_Coils[GVL.CancelWaterPositioner+(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;				// clear water positioner bool
+			GVL.mb_Output_Coils[GVL.PLCerrorLastRequestWtr+(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;			// clear water error bool
+			GVL.mb_Output_Coils[GVL.WtrControlRUN+(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;						// clear water run bool
+			GVL.mb_Output_Coils[GVL.Water_RUNNING+(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;						// clear water running bool
+			GVL.mb_Output_Registers[GVL.WATERFUNCTSETTING + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] := GVL.MANUAL_FUNCTION;  //function setting to manual
+			GVL.mb_Output_Coils[GVL.WtrControl_OFF+(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;										// clear OFF bool
+			GVL.mb_Output_Coils[GVL.WtrControl_OFF2+(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;										// clear OFF2 bool
+			GVL.mb_Output_Registers[GVL.WATERFLOODTIME + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] := 0;  //flood time to zero
+			GVL.mb_Output_Coils[GVL.CANCELWATERFLOOD+(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;										// clear flood bool
+		END_IF
+
+	END_FOR
+	
+	
+END_IF
+
+	GVL.mb_Output_Registers[GVL.w_STATE] := GVL.mb_Output_Registers[GVL.w_STATE]+1;
+
+]]></ST>
+    </Implementation>
+    <LineIds Name="FBInitializeProgram">
+      <LineId Id="438" Count="17" />
+      <LineId Id="698" Count="0" />
+      <LineId Id="595" Count="0" />
+      <LineId Id="456" Count="42" />
+      <LineId Id="697" Count="0" />
+      <LineId Id="499" Count="16" />
+      <LineId Id="625" Count="0" />
+      <LineId Id="915" Count="0" />
+      <LineId Id="918" Count="0" />
+      <LineId Id="920" Count="2" />
+      <LineId Id="516" Count="2" />
+      <LineId Id="627" Count="0" />
+      <LineId Id="519" Count="3" />
+      <LineId Id="601" Count="0" />
+      <LineId Id="696" Count="0" />
+      <LineId Id="997" Count="0" />
+      <LineId Id="993" Count="1" />
+      <LineId Id="996" Count="0" />
+      <LineId Id="1002" Count="0" />
+      <LineId Id="995" Count="0" />
+      <LineId Id="524" Count="0" />
+      <LineId Id="1005" Count="2" />
+      <LineId Id="1009" Count="1" />
+      <LineId Id="1018" Count="0" />
+      <LineId Id="1020" Count="0" />
+      <LineId Id="1022" Count="0" />
+      <LineId Id="1028" Count="0" />
+      <LineId Id="525" Count="1" />
+      <LineId Id="1045" Count="6" />
+      <LineId Id="1054" Count="6" />
+      <LineId Id="1096" Count="5" />
+      <LineId Id="1061" Count="0" />
+      <LineId Id="1053" Count="0" />
+      <LineId Id="1052" Count="0" />
+      <LineId Id="1044" Count="0" />
+      <LineId Id="527" Count="2" />
+      <LineId Id="73" Count="0" />
+      <LineId Id="133" Count="1" />
+      <LineId Id="132" Count="0" />
+      <LineId Id="2" Count="0" />
+      <LineId Id="530" Count="0" />
+      <LineId Id="101" Count="0" />
+      <LineId Id="1090" Count="0" />
+      <LineId Id="102" Count="2" />
+      <LineId Id="917" Count="0" />
+      <LineId Id="919" Count="0" />
+      <LineId Id="926" Count="2" />
+      <LineId Id="916" Count="0" />
+      <LineId Id="106" Count="0" />
+      <LineId Id="766" Count="0" />
+      <LineId Id="107" Count="0" />
+      <LineId Id="767" Count="1" />
+      <LineId Id="772" Count="2" />
+      <LineId Id="845" Count="0" />
+      <LineId Id="844" Count="0" />
+      <LineId Id="771" Count="0" />
+      <LineId Id="998" Count="1" />
+      <LineId Id="1003" Count="1" />
+      <LineId Id="1001" Count="0" />
+      <LineId Id="1011" Count="3" />
+      <LineId Id="1016" Count="1" />
+      <LineId Id="769" Count="0" />
+      <LineId Id="1166" Count="4" />
+      <LineId Id="108" Count="2" />
+      <LineId Id="600" Count="0" />
+      <LineId Id="111" Count="0" />
+      <LineId Id="130" Count="1" />
+      <LineId Id="846" Count="1" />
+      <LineId Id="1171" Count="0" />
+      <LineId Id="848" Count="1" />
+      <LineId Id="136" Count="2" />
+      <LineId Id="1062" Count="7" />
+      <LineId Id="1081" Count="6" />
+      <LineId Id="1091" Count="4" />
+      <LineId Id="1088" Count="1" />
+      <LineId Id="1079" Count="1" />
+      <LineId Id="139" Count="4" />
+      <LineId Id="850" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

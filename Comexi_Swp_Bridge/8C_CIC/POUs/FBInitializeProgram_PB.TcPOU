@@ -1,0 +1,157 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.10">
+  <POU Name="FBInitializeProgram_PB" Id="{9dcd6240-f38a-483a-8e3d-e269b4ad0731}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FBInitializeProgram_PB
+
+///SDOC/////////////////////////////////////////////////////////////////////////
+//
+//  FBInitializeProgram_PB.TcPOU      - Function Block - PLC initialization of arrays from MODBUS for Profibus - AVT PLC 
+//
+//  Author:          Mark Colvin                            Date: Sept 5, 2018
+//
+//	Beckhoff TC3 Structured Text for CX8190 PLC
+//
+//	includes features:
+//		10 inker enables
+///////////////////////////////////////////////////////////////////////SDOCEND//
+
+VAR_INPUT	
+END_VAR
+VAR_OUTPUT
+END_VAR
+VAR
+		
+CONSTANT
+		d_1VOLTTODINT			:DINT:= 781250;  // 1 volt = 10% of DINT = 781250  (24 bit)
+		r_1VOLTTOINT			:REAL:= 3276.7;  //	1 volt = 10% of INT = 32767 (16 bit), assuming 0 to 10.0 VDC is input range of positioner feedback/DtoA output
+		
+END_VAR
+
+VAR
+	// === LOCAL DATA === NOT saved over power cycles
+	Index					:WORD;
+	
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[(************************************************************************************************
+ *
+ *   FUNCTION BLOCK	:FBInitializeProgram_PB
+ *
+ *   Author		:	Mark Colvin
+ *
+ *   Description:	Initializes PLC.  No data from App Server is loaded, important data is written from constants here. Runtime data 
+ *					is initialized on first pass into PLC, then persistent data storage is used.
+ *					Appropriate booleans are set for feature enables, the rest of booleans are reset.
+ *
+ *   Parameters	:	void
+ *
+ *   Returns	:	void	
+ *
+ *   History	:   17-Sep-18, MarkC Created
+ *					Oct 31 2018 mac - set unused MODBUS registers to flag runtime data has been initialized. if so, don't chg runtime data here
+ *
+ ***************************************************************************************************)
+	GVL.mb_Output_Registers[GVL.W_STATE] := GVL.mb_Output_Registers[GVL.W_STATE]+1;
+			// system configuration enable BOOLEANS
+	GVL.mb_Output_Coils[GVL.INKRAMPINGENABLED] 		:= FALSE;	//speed based trim adjust for all inkers, all fountains (auto)
+	GVL.mb_Output_Coils[GVL.WATERRAMPINGENABLED] 		:= FALSE; 	//speed based trim adjust for water, all fountains (auto)
+	GVL.mb_Output_Coils[GVL.ENABLEINKINGHOLDOFF] 		:= FALSE; 	//ductor control for all inkers
+	GVL.mb_Output_Coils[GVL.ENABLEINKSURGE] 			:= FALSE;	//temporary ink surge operation
+	GVL.mb_Output_Coils[GVL.ENABLEWATERFLOOD	] 		:= FALSE;	//temporary water flood operation 
+	GVL.mb_Output_Coils[GVL.ENABLEINKERWASHUP] 		:= FALSE;	//temporary inker wash-up operation
+	GVL.mb_Output_Coils[GVL.ENABLEINKSWEEPCONTROL] 	:= TRUE;		//inker speed control (basic)	*****************
+	GVL.mb_Output_Coils[GVL.ENABLEWATERCONTROL] 		:= FALSE;	//water speed control (basic)
+	GVL.mb_Output_Coils[GVL.ENABLEINKERFUNCTION] 		:= FALSE;	//operator control of inker functions (off, manual, auto)
+	GVL.mb_Output_Coils[GVL.ENABLEWATERFUNCTION] 		:= FALSE;	//operator control of water functions (off, manual, auto)
+	GVL.mb_Output_Coils[GVL.ENABLEINKOUTCANCEL] 		:= FALSE;	//operator cancel control of inker positioners 		- not used
+	GVL.mb_Output_Coils[GVL.ENABLEWATEROUTCANCEL] 	:= FALSE;	//operator cancel control of water positioners 		- not used
+	GVL.mb_Output_Coils[GVL.ENABLEFOUNTAIN+0] 		:= TRUE;		//fountain enables to PLC (1st inker, up to 10 fountains)	*******
+	GVL.mb_Output_Coils[GVL.ENABLEFOUNTAIN+1] 		:= TRUE;		//fountain enables to PLC (1st inker, up to 10 fountains)	*******
+	GVL.mb_Output_Coils[GVL.ENABLEFOUNTAIN+2] 		:= TRUE;		//fountain enables to PLC (1st inker, up to 10 fountains)	*******
+	GVL.mb_Output_Coils[GVL.ENABLEFOUNTAIN+3] 		:= TRUE;		//fountain enables to PLC (1st inker, up to 10 fountains)	*******
+	GVL.mb_Output_Coils[GVL.ENABLEFOUNTAIN+4] 		:= TRUE;		//fountain enables to PLC (1st inker, up to 10 fountains)	*******
+	GVL.mb_Output_Coils[GVL.ENABLEFOUNTAIN+5] 		:= TRUE;		//fountain enables to PLC (1st inker, up to 10 fountains)	*******
+	GVL.mb_Output_Coils[GVL.ENABLEFOUNTAIN+6] 		:= TRUE;		//fountain enables to PLC (1st inker, up to 10 fountains)	*******
+	GVL.mb_Output_Coils[GVL.ENABLEFOUNTAIN+7] 		:= TRUE;		//fountain enables to PLC (1st inker, up to 10 fountains)	*******
+	GVL.mb_Output_Coils[GVL.ENABLEFOUNTAIN+8] 		:= FALSE;	//fountain enables to PLC (1st inker, up to 10 fountains)
+	GVL.mb_Output_Coils[GVL.ENABLEFOUNTAIN+9] 		:= FALSE;	//fountain enables to PLC (1st inker, up to 10 fountains)
+
+										//PLC configuration data (single value for all inkers) - MODBUS indexes in constants
+	GVL.mb_Output_Registers[GVL.MINSWEEPTRIM	] 		:= 0;		//percentage, min ink trim
+	GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM] 		:= 99;		//percentage, max ink trim
+	GVL.mb_Output_Registers[GVL.MINWATERTRIM	] 		:= 0;		//percentage, min water trim
+	GVL.mb_Output_Registers[GVL.MAXWATERTRIM	] 		:= 99;		//percentage, max water trim
+	GVL.mb_Output_Registers[GVL.INKERHARDWARETYPE] 		:= GVL.SWPWTR_BRIDGE;	//inker positioners type (0=up/down, 1=up/down w/fb, 2=analog output (0-10 VDC), bridge to profibus
+	GVL.mb_Output_Registers[GVL.ERRORREGISTER1] 		:= 0;		//PLC generated error code queue start
+	GVL.mb_Output_Registers[GVL.ERRORREGISTER1+1]		:= 0;		//PLC generated error code queue 
+	GVL.mb_Output_Registers[GVL.ERRORREGISTER1+2]		:= 0;		//PLC generated error code queue 
+	GVL.mb_Output_Registers[GVL.ERRORREGISTER1+3]		:= 0;		//PLC generated error code queue 
+	GVL.mb_Output_Registers[GVL.ERRORREGISTER5] 		:= 0;		//PLC generated error code queue end
+	GVL.mb_Output_Registers[GVL.ERRORCOUNT] 			:= 0;		//PLC generated error code queue current error count
+	GVL.mb_Output_Registers[GVL.WATERHARDWARETYPE] 	:= GVL.SWPWTR_BRIDGE;	//water positioners type (0=up/down, 1=up/down w/FB, 2=analog output (0-10 VDC), bridge to profibus
+
+	IF((GVL.mb_Output_Registers[5] = 100) AND (GVL.mb_Output_Registers[6] = 200)) THEN		//test if MODBUS data in PLC has been initialized
+		FOR Index:= 0 TO GVL.W_MAXFOUNTAINS DO		//ALL Fountains are configured - DO WE REALLY WANT TO INITIALIZE RUNTIME DATA here????
+			GVL.mb_Output_Registers[GVL.SWEEPTRIM+(GVL.WORDRUNTIMEGROUPSIZE * Index)] 			:= 0;	 	//inker trim target from slave (1st inker)----Runtime fountain data - MODBUS indexes 61 to 210---
+			GVL.mb_Output_Registers[GVL.WATERTRIM+(GVL.WORDRUNTIMEGROUPSIZE * Index)] 			:= 0;	 	//water trim target from slave (1st inker)
+			GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS+(GVL.WORDRUNTIMEGROUPSIZE * Index)] 	:= 0; 		//inker trim position from PLC (1st inker), from inker feedback voltage
+			GVL.mb_Output_Registers[GVL.WATERTRIMONPRESS+(GVL.WORDRUNTIMEGROUPSIZE * Index)] 	:= 0;	 	//water trim position from PLC (1st inker), from water feedback voltage
+			GVL.w_LastSweepTrim[Index]		:=0;			 		// Last ink trim in  ink sweep/ramping, used to tell if new trim and we need to move
+			GVL.w_LastWaterTrim[Index]		:=0;					// Last water trim in water setting/ramping, used to tell if new trim and we need to move
+			GVL.w_WaterTrimOnPress2[Index]	:=0;					// Used to restore previous water trim after power cycle
+		END_FOR
+	END_IF
+	GVL.mb_Output_Registers[5] := 100;	// this flags the MODBUS data as being initialized, don't do it again.
+	GVL.mb_Output_Registers[6] := 200;
+
+	GVL.mb_Output_Registers[GVL.REALTIME_PLC_A2D] 		:= 0;	//FSE tool for analog data checking (16bit value)
+	GVL.mb_Output_Registers[GVL.REALTIME_DATA_SELECTION] 	:= 0;	//Input selection index for providing source to REALTIME_PLC_A2D
+														//1 to 10: ink sweep; 11 to 20: water control; 21: press speed
+	GVL.mb_Output_Registers[GVL.W_STATE] := GVL.mb_Output_Registers[GVL.W_STATE]+1;
+														// ----Runtime fountain data - MODBUS indexes 71 to     ---
+	FOR Index := 0 TO GVL.W_MAXFOUNTAINS DO
+		GVL.mb_Output_Coils[GVL.PLCerrorLastRequestInk +Index] 	:= FALSE;	//PLC error detected during last INK move request, PLC to reset (1st inker)
+		GVL.mb_Output_Coils[GVL.InkSweepRUN +Index]	 			:= FALSE;	//True to RUN ink positioner to curr trgt, PLC reset if reaches trgt or error (1st inker)
+		GVL.mb_Output_Coils[GVL.WtrControlRUN +Index]	 			:= FALSE;	//True to RUN water positioner to curr trgt, PLC reset if reaches trgt or error (1st inker)
+		GVL.mb_Output_Coils[GVL.PLCerrorLastRequestWtr +Index] 	:= FALSE;	//PLC error detected during last INK move request, PLC to reset (1st inker)
+		GVL.mb_Output_Coils[GVL.Inker_RUNNING +Index] 			:= FALSE;	//True means the inker positioner motor is moving (to slave) (1st inker)
+		GVL.mb_Output_Coils[GVL.Water_RUNNING +Index] 			:= FALSE;	//True means the water positioner motor is moving (to slave) (1st inker)
+		GVL.b_InkTrimMoving[Index]							:= FALSE;	  // Is the ink trim moving 		NOT USED
+	END_FOR
+
+IF (GVL.mb_Output_Coils[GVL.ENABLEINKSWEEPCONTROL]) THEN   //if ink sweep option enabled, init inker 
+
+	FOR Index:= 0 TO GVL.W_MAXFOUNTAINS DO		//ALL Fountains are configured
+
+	END_FOR
+
+END_IF
+	GVL.mb_Output_Registers[GVL.W_STATE] := GVL.mb_Output_Registers[GVL.W_STATE]+1;
+
+IF (GVL.mb_Output_Coils[GVL.ENABLEWATERCONTROL]) THEN   //if water control option enabled, init water 
+	FOR Index:= 0 TO GVL.W_MAXFOUNTAINS DO			//ALL Fountains are configured
+
+	END_FOR	
+	
+END_IF
+
+	GVL.mb_Output_Registers[GVL.W_STATE] := GVL.mb_Output_Registers[GVL.W_STATE]+1;
+
+]]></ST>
+    </Implementation>
+    <LineIds Name="FBInitializeProgram_PB">
+      <LineId Id="3" Count="6" />
+      <LineId Id="167" Count="1" />
+      <LineId Id="10" Count="5" />
+      <LineId Id="135" Count="0" />
+      <LineId Id="16" Count="39" />
+      <LineId Id="133" Count="0" />
+      <LineId Id="56" Count="10" />
+      <LineId Id="131" Count="1" />
+      <LineId Id="134" Count="0" />
+      <LineId Id="67" Count="32" />
+      <LineId Id="2" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

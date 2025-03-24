@@ -1,0 +1,307 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.10">
+  <POU Name="MAIN" Id="{34af0676-9edd-4500-8a12-a063fccc1b82}" SpecialFunc="None">
+    <Declaration><![CDATA[PROGRAM MAIN
+///SDOC/////////////////////////////////////////////////////////////////////////
+//
+//  MAIN.TcPOU      - Main PLC top level loop - AVT PLC Comexi Bridge - MODBUS to Profibus 
+//
+//  Author:         Mark Colvin                         Date: Sept 5, 2018
+//
+//	Beckhoff TC3 Structured Text for CX8190 PLC - Profibus sweep Bridge for Comexi 8C CIC press 
+//
+//	includes features:
+//		10 inker enables
+///////////////////////////////////////////////////////////////////////SDOCEND//
+	// === LOCAL DATA ===
+	//-- instance---		--- POU file name ---
+
+
+VAR
+	// === LOCAL DATA ===
+	//-- instance---		--- POU file name ---
+	FB_InitializeProgram	:FBInitializeProgram_PB;	//setup fixed data in PLC, no data from Mercury app server
+	FB_InkSweep_Bridge		:FBInkSweep_PB;			//profibus bridge input and output registers only
+	FB_RealtimeSupport	:FBRealtimeSupport;			//real time data not supported yet
+	
+	Index				:WORD;
+	wError				:WORD;
+	TON_wait			:TON;
+	
+
+	GVT: INT;
+	MISSINGFBSIGNAL: INT;
+END_VAR
+VAR CONSTANT
+	FTN1		:WORD:= 0;	//constants for fountain indexes fro IO arrays in TBs
+	FTN2		:WORD:= 1;
+	FTN3		:WORD:= 2;
+	FTN4		:WORD:= 3;
+	FTN5		:WORD:= 4;
+	FTN6		:WORD:= 5;
+	FTN7		:WORD:= 6;
+	FTN8		:WORD:= 7;
+	FTN9		:WORD:= 8;
+	FTN10		:WORD:= 9;
+//	wMotorTimeOn :WORD:=500;  //wMotorTimeOn, how long the output is ON for ONE motor adjustment(+ or -), 1000 = 1second
+END_VAR
+
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[
+// set PLC image version - Sept 28, 2020
+GVL.mb_Output_Registers[GVL.PLCVERSIONNUMBER]:= 1;   // Major revision number
+GVL.mb_Output_Registers[GVL.PLCMINORREVISION]:= 0;  // Minor revision number x 100
+
+//  AVT PLC HISTORY
+//  0.10	13-Sep-18	Mark C	Added base code for previous PLC code	
+//
+/////////////////////////////////////////////////////////////////////////////
+//  
+//  Main		PLC top level loop
+//
+//  Author:	MarkC 
+//
+//	Main History
+//	13-Sep-18	MarkC	Created
+// 
+//***********************************************************************************************
+
+//********************************************************************************
+// PLC FULL INITIALIZATION - if MODBUS boolean set from Mercury App Server, perform this code
+//********************************************************************************
+IF (GVL.mb_Output_Coils[GVL.ENABLEFULLINIT] = TRUE) THEN
+
+	GVL.mb_Output_Registers[GVL.W_STATE] := 0;
+//	TON_wait(IN:=TRUE, PT:=T#5S, Q=> , ET=>);
+//	WHILE GVL.mb_Output_Registers[GVL.W_STATE] < 5000 DO // do this init many times ...
+		FB_InitializeProgram();		
+//	END_WHILE
+
+	GVL.mb_Output_Coils[GVL.ENABLEFULLINIT] := FALSE;		//done with full initialization of PLC config	
+	TON_wait(IN:=TRUE, PT:=T#1S, Q=> , ET=>);				//wait until 1 second to stabilize
+
+	GVL.mb_Output_Registers[GVL.W_STATE] := 0;
+	GVL.mb_Output_Registers[7] := GVL_IO.w_PB_interface_status;		//capture Profibus status here
+	WHILE (GVL_IO.w_PB_interface_status > 0 ) DO
+		GVL.mb_Output_Registers[GVL.W_STATE] := GVL.mb_Output_Registers[GVL.W_STATE] + 1;
+		IF (GVL.mb_Output_Registers[GVL.W_STATE] > 20000) THEN
+			EXIT;
+		END_IF
+	END_WHILE
+	// kick the profibus into data exchanges
+			//move Profibus  input data into output data to start exchanges?
+			GVL_IO.w_PB_Outputs[FTN1] := GVL_IO.w_PB_Inputs[FTN1];
+			GVL_IO.w_PB_Outputs[FTN2] := GVL_IO.w_PB_Inputs[FTN2];
+			GVL_IO.w_PB_Outputs[FTN3] := GVL_IO.w_PB_Inputs[FTN3];
+			GVL_IO.w_PB_Outputs[FTN4] := GVL_IO.w_PB_Inputs[FTN4];
+			GVL_IO.w_PB_Outputs[FTN5] := GVL_IO.w_PB_Inputs[FTN5];
+			GVL_IO.w_PB_Outputs[FTN6] := GVL_IO.w_PB_Inputs[FTN6];
+			GVL_IO.w_PB_Outputs[FTN7] := GVL_IO.w_PB_Inputs[FTN7];
+			GVL_IO.w_PB_Outputs[FTN8] := GVL_IO.w_PB_Inputs[FTN8];
+	//	FTN9:	//move GVL.SWEEPTRIM + (Index * GVL.WORDRUNTIMEGROUPSIZE)  to Profibus data
+	//		GVL_IO.w_PB_Outputs[FTN9] := GVL.mb_Output_Registers[GVL.SWEEPTRIM + (Index * GVL.WORDRUNTIMEGROUPSIZE)];
+	//	FTN10:	//move GVL.SWEEPTRIM + (Index * GVL.WORDRUNTIMEGROUPSIZE)  to Profibus data
+	//		GVL_IO.w_PB_Outputs[FTN10] := GVL.mb_Output_Registers[GVL.SWEEPTRIM + (Index * GVL.WORDRUNTIMEGROUPSIZE)];
+	GVL.mb_Output_Registers[8] := GVL_IO.w_PB_interface_status;		//capture Profibus status here
+
+END_IF
+
+
+//**************************************
+// PERFORM SWEEP operations
+IF( GVL.mb_Output_Coils[GVL.ENABLEINKSWEEPCONTROL] ) THEN
+	CASE GVL.mb_Output_Registers[GVL.INKERHARDWARETYPE] OF
+	GVL.SWPWTR_TIME:			//move by time
+//		FB_InkSweep_Time();
+	GVL.SWPWTR_FB:			//move by analog feedback
+//		FB_InkSweep_FB();
+	GVL.SWPWTR_OUTPUT:		//analog output
+//		FB_InkSweep_Out();
+	GVL.SWPWTR_BRIDGE:		//direct bridge to Profibus - process MODBUS data for sweep changes
+		FB_InkSweep_Bridge();
+	END_CASE
+
+END_IF
+
+IF( GVL_IO.w_PB_interface_status = 0 ) THEN		// zero is normal, other values is a problem. (Some issue with Profibus connection)
+	FOR Index := 0 TO GVL.W_MAXFOUNTAINS DO		//normal operations - loop ALL the configured fountains
+		//DP address 223 is input, 239 is output address 
+	(* *** Profibus register addresses here  ????
+		7100 // ftn 1 - 32 bit
+		7104 // ftn 2
+		7108 // ftn 3
+		7112 // ftn 4
+		7116 // ftn 5
+		7120 // ftn 6
+		7124 // ftn 7
+		7128 // ftn 8
+		7132 // ??? 16 bit for address 145 and 161 - life bit?
+	*)
+		//READ onpress data from Profibus addresses to MODBUS data - GVL.SWEEPTRIMONPRESS + (Index * GVL.WORDRUNTIMEGROUPSIZE)
+		CASE Index OF
+		FTN1:	//move Profibus data to GVL.SWEEPTRIMONPRESS + (Index * GVL.WORDRUNTIMEGROUPSIZE)
+			GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + (Index * GVL.WORDRUNTIMEGROUPSIZE)] := GVL_IO.w_PB_Inputs[FTN1];
+		FTN2:	//move Profibus data to GVL.SWEEPTRIMONPRESS + (Index * GVL.WORDRUNTIMEGROUPSIZE)
+			GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + (Index * GVL.WORDRUNTIMEGROUPSIZE)] := GVL_IO.w_PB_Inputs[FTN2];
+		FTN3:	//move Profibus data to GVL.SWEEPTRIMONPRESS + (Index * GVL.WORDRUNTIMEGROUPSIZE)
+			GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + (Index * GVL.WORDRUNTIMEGROUPSIZE)] := GVL_IO.w_PB_Inputs[FTN3];
+		FTN4:	//move Profibus data to GVL.SWEEPTRIMONPRESS + (Index * GVL.WORDRUNTIMEGROUPSIZE)
+			GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + (Index * GVL.WORDRUNTIMEGROUPSIZE)] := GVL_IO.w_PB_Inputs[FTN4];
+		FTN5:	//move Profibus data to GVL.SWEEPTRIMONPRESS + (Index * GVL.WORDRUNTIMEGROUPSIZE)
+			GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + (Index * GVL.WORDRUNTIMEGROUPSIZE)] := GVL_IO.w_PB_Inputs[FTN5];
+		FTN6:	//move Profibus data to GVL.SWEEPTRIMONPRESS + (Index * GVL.WORDRUNTIMEGROUPSIZE)
+			GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + (Index * GVL.WORDRUNTIMEGROUPSIZE)] := GVL_IO.w_PB_Inputs[FTN6];
+		FTN7:	//move Profibus data to GVL.SWEEPTRIMONPRESS + (Index * GVL.WORDRUNTIMEGROUPSIZE)
+			GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + (Index * GVL.WORDRUNTIMEGROUPSIZE)] := GVL_IO.w_PB_Inputs[FTN7];
+		FTN8:	//move Profibus data to GVL.SWEEPTRIMONPRESS + (Index * GVL.WORDRUNTIMEGROUPSIZE)
+			GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + (Index * GVL.WORDRUNTIMEGROUPSIZE)] := GVL_IO.w_PB_Inputs[FTN8];
+	//	FTN9:	//move Profibus data to GVL.SWEEPTRIMONPRESS + (Index * GVL.WORDRUNTIMEGROUPSIZE)
+	//		GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + (Index * GVL.WORDRUNTIMEGROUPSIZE)] := GVL_IO.w_PB_Inputs[FTN9];
+	//	FTN10:	//move Profibus data to GVL.SWEEPTRIMONPRESS + (Index * GVL.WORDRUNTIMEGROUPSIZE)
+	//		GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + (Index * GVL.WORDRUNTIMEGROUPSIZE)] := GVL_IO.w_PB_Inputs[FTN10];
+		
+		END_CASE
+		
+		//WRITE Mercury console data to Profibus address from MODBUS - GVL.SWEEPTRIM + (Index * GVL.WORDRUNTIMEGROUPSIZE)
+		CASE Index OF
+		FTN1:	//move GVL.SWEEPTRIM + (Index * GVL.WORDRUNTIMEGROUPSIZE)  to Profibus data
+			GVL_IO.w_PB_Outputs[FTN1] := GVL.mb_Output_Registers[GVL.SWEEPTRIM + (Index * GVL.WORDRUNTIMEGROUPSIZE)];
+		FTN2:	//move GVL.SWEEPTRIM + (Index * GVL.WORDRUNTIMEGROUPSIZE)  to Profibus data
+			GVL_IO.w_PB_Outputs[FTN2] := GVL.mb_Output_Registers[GVL.SWEEPTRIM + (Index * GVL.WORDRUNTIMEGROUPSIZE)];
+		FTN3:	//move GVL.SWEEPTRIM + (Index * GVL.WORDRUNTIMEGROUPSIZE)  to Profibus data
+			GVL_IO.w_PB_Outputs[FTN3] := GVL.mb_Output_Registers[GVL.SWEEPTRIM + (Index * GVL.WORDRUNTIMEGROUPSIZE)];
+		FTN4:	//move GVL.SWEEPTRIM + (Index * GVL.WORDRUNTIMEGROUPSIZE)  to Profibus data
+			GVL_IO.w_PB_Outputs[FTN4] := GVL.mb_Output_Registers[GVL.SWEEPTRIM + (Index * GVL.WORDRUNTIMEGROUPSIZE)];
+		FTN5:	//move GVL.SWEEPTRIM + (Index * GVL.WORDRUNTIMEGROUPSIZE)  to Profibus data
+			GVL_IO.w_PB_Outputs[FTN5] := GVL.mb_Output_Registers[GVL.SWEEPTRIM + (Index * GVL.WORDRUNTIMEGROUPSIZE)];
+		FTN6:	//move GVL.SWEEPTRIM + (Index * GVL.WORDRUNTIMEGROUPSIZE)  to Profibus data
+			GVL_IO.w_PB_Outputs[FTN6] := GVL.mb_Output_Registers[GVL.SWEEPTRIM + (Index * GVL.WORDRUNTIMEGROUPSIZE)];
+		FTN7:	//move GVL.SWEEPTRIM + (Index * GVL.WORDRUNTIMEGROUPSIZE)  to Profibus data
+			GVL_IO.w_PB_Outputs[FTN7] := GVL.mb_Output_Registers[GVL.SWEEPTRIM + (Index * GVL.WORDRUNTIMEGROUPSIZE)];
+		FTN8:	//move GVL.SWEEPTRIM + (Index * GVL.WORDRUNTIMEGROUPSIZE)  to Profibus data
+			GVL_IO.w_PB_Outputs[FTN8] := GVL.mb_Output_Registers[GVL.SWEEPTRIM + (Index * GVL.WORDRUNTIMEGROUPSIZE)];
+	//	FTN9:	//move GVL.SWEEPTRIM + (Index * GVL.WORDRUNTIMEGROUPSIZE)  to Profibus data
+	//		GVL_IO.w_PB_Outputs[FTN9] := GVL.mb_Output_Registers[GVL.SWEEPTRIM + (Index * GVL.WORDRUNTIMEGROUPSIZE)];
+	//	FTN10:	//move GVL.SWEEPTRIM + (Index * GVL.WORDRUNTIMEGROUPSIZE)  to Profibus data
+	//		GVL_IO.w_PB_Outputs[FTN10] := GVL.mb_Output_Registers[GVL.SWEEPTRIM + (Index * GVL.WORDRUNTIMEGROUPSIZE)];
+		
+		END_CASE
+		
+		
+	END_FOR
+ELSE
+	GVL.mb_Output_Registers[9] := GVL_IO.w_PB_interface_status;		//capture Profibus status here
+	GVL.mb_Output_Registers[GVL.W_STATE] := 0;
+	// kick the profibus into data exchanges
+	//move Profibus  input data into output data to start exchanges?
+	GVL_IO.w_PB_Outputs[FTN1] := GVL_IO.w_PB_Inputs[FTN1];
+	GVL_IO.w_PB_Outputs[FTN2] := GVL_IO.w_PB_Inputs[FTN2];
+	GVL_IO.w_PB_Outputs[FTN3] := GVL_IO.w_PB_Inputs[FTN3];
+	GVL_IO.w_PB_Outputs[FTN4] := GVL_IO.w_PB_Inputs[FTN4];
+	GVL_IO.w_PB_Outputs[FTN5] := GVL_IO.w_PB_Inputs[FTN5];
+	GVL_IO.w_PB_Outputs[FTN6] := GVL_IO.w_PB_Inputs[FTN6];
+	GVL_IO.w_PB_Outputs[FTN7] := GVL_IO.w_PB_Inputs[FTN7];
+	GVL_IO.w_PB_Outputs[FTN8] := GVL_IO.w_PB_Inputs[FTN8];
+
+	WHILE (GVL_IO.w_PB_interface_status > 0 ) DO
+		GVL.mb_Output_Registers[GVL.W_STATE] := GVL.mb_Output_Registers[GVL.W_STATE] + 1;
+		IF (GVL.mb_Output_Registers[GVL.W_STATE] > 20000) THEN
+			EXIT;
+		END_IF
+	END_WHILE
+	GVL.mb_Output_Registers[10] := GVL_IO.w_PB_interface_status;		//capture Profibus status here
+	IF (GVL_IO.w_PB_interface_status > 0 ) THEN
+		// the Profibus interface is not working(via test of GVL_IO.w_PB_interface_status ), add error for each fountain for logging and set PLCerror boolean for each inker
+		FOR Index := 0 TO GVL.W_MAXFOUNTAINS DO					// loop ALL the configured fountains
+			wError := (GVL.MISSINGFBSIGNAL*100) + (Index+1);
+			FProcessError(ErrorNumber:= wError ); 				// Set Ink Input Feedback Error for AppServer to process. 
+			GVL.mb_Output_Coils[GVL.PLCerrorLastRequestInk+(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := TRUE;	// set bool to show AS error condition in Profibus		
+		END_FOR
+	END_IF
+END_IF
+//Real-time monitoring of selected analog inputs and outputs
+//FB_RealtimeSupport();
+
+//--end of main--
+
+
+]]></ST>
+    </Implementation>
+    <LineIds Name="MAIN">
+      <LineId Id="2" Count="0" />
+      <LineId Id="4" Count="29" />
+      <LineId Id="365" Count="0" />
+      <LineId Id="476" Count="0" />
+      <LineId Id="475" Count="0" />
+      <LineId Id="552" Count="0" />
+      <LineId Id="459" Count="1" />
+      <LineId Id="462" Count="2" />
+      <LineId Id="461" Count="0" />
+      <LineId Id="477" Count="0" />
+      <LineId Id="494" Count="1" />
+      <LineId Id="544" Count="6" />
+      <LineId Id="535" Count="3" />
+      <LineId Id="553" Count="0" />
+      <LineId Id="478" Count="0" />
+      <LineId Id="34" Count="0" />
+      <LineId Id="36" Count="17" />
+      <LineId Id="307" Count="0" />
+      <LineId Id="54" Count="6" />
+      <LineId Id="76" Count="0" />
+      <LineId Id="61" Count="7" />
+      <LineId Id="145" Count="0" />
+      <LineId Id="69" Count="0" />
+      <LineId Id="150" Count="0" />
+      <LineId Id="70" Count="0" />
+      <LineId Id="151" Count="0" />
+      <LineId Id="71" Count="0" />
+      <LineId Id="152" Count="0" />
+      <LineId Id="72" Count="0" />
+      <LineId Id="153" Count="0" />
+      <LineId Id="73" Count="0" />
+      <LineId Id="154" Count="0" />
+      <LineId Id="74" Count="0" />
+      <LineId Id="155" Count="0" />
+      <LineId Id="75" Count="0" />
+      <LineId Id="156" Count="0" />
+      <LineId Id="299" Count="3" />
+      <LineId Id="254" Count="2" />
+      <LineId Id="79" Count="2" />
+      <LineId Id="157" Count="0" />
+      <LineId Id="82" Count="0" />
+      <LineId Id="159" Count="0" />
+      <LineId Id="83" Count="0" />
+      <LineId Id="160" Count="0" />
+      <LineId Id="84" Count="0" />
+      <LineId Id="161" Count="0" />
+      <LineId Id="85" Count="0" />
+      <LineId Id="162" Count="0" />
+      <LineId Id="86" Count="0" />
+      <LineId Id="163" Count="0" />
+      <LineId Id="87" Count="0" />
+      <LineId Id="164" Count="0" />
+      <LineId Id="88" Count="0" />
+      <LineId Id="165" Count="0" />
+      <LineId Id="303" Count="3" />
+      <LineId Id="89" Count="4" />
+      <LineId Id="308" Count="0" />
+      <LineId Id="551" Count="0" />
+      <LineId Id="474" Count="0" />
+      <LineId Id="554" Count="10" />
+      <LineId Id="466" Count="5" />
+      <LineId Id="413" Count="0" />
+      <LineId Id="472" Count="0" />
+      <LineId Id="314" Count="0" />
+      <LineId Id="317" Count="0" />
+      <LineId Id="309" Count="0" />
+      <LineId Id="319" Count="0" />
+      <LineId Id="367" Count="0" />
+      <LineId Id="318" Count="0" />
+      <LineId Id="473" Count="0" />
+      <LineId Id="310" Count="0" />
+      <LineId Id="94" Count="5" />
+      <LineId Id="101" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

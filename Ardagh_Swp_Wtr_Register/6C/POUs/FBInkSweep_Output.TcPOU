@@ -1,0 +1,96 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.10">
+  <POU Name="FBInkSweep_Output" Id="{0bd4c619-021e-4ef7-adaf-222278d1d506}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FBInkSweep_Output
+VAR_INPUT
+END_VAR
+VAR_OUTPUT
+	
+END_VAR
+VAR
+
+///SDOC/////////////////////////////////////////////////////////////////////////
+//
+//  FBInkSweep_Output.TcPOU      - Function Block - ink sweep control with analog voltage outputs - AVT PLC 
+//
+//  Author:         Mark Colvin                        Date: April 17, 2018
+//
+//	Beckhoff TC3 Structured Text for CX50x0 PLC
+//
+//	includes features:
+//		10 inker enables
+//		Ink ramping
+//		Water ramping
+//		Ink Surge
+//		Water Flood
+//		Ink Ducting (Hold Off)
+//		Ink Wash Up 
+//		Ink Function Control (Off/manual/auto)
+//		water Function Control (off/manual/auto)
+//		Inker positioner with feedback
+//		Water positioner with feedback
+//		Inker Analog Control
+//		water Analog Control
+//		Inker Positioner output cancel
+//		Water Positioner output cancel
+///////////////////////////////////////////////////////////////////////SDOCEND//
+
+	w_InkTrim				:ARRAY[0..GVL.w_MAXFOUNTAINS] OF WORD;	// temp for ink trim
+	Index 					:WORD; 								// temp index of the fountain
+	Index_offset			:WORD;								//index offset to runtime data for fountains 7 to 10; 0 or 220
+	r_OutVolt				:REAL;								// temp voltage output for ftn ink
+	r_TargetInkTrim			:ARRAY[0..GVL.w_MAXFOUNTAINS] OF REAL;	// temp real for ink trim
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[(************************************************************************************************
+ *
+ *   FUNCTION BLOCK	:FBInkSweep_Output
+ *
+ *   Author		:	Mark Colvin
+ *
+ *   Description:	Perform Ink Sweep.  ink sweep control with analog voltage outputs - AVT PLC 
+ *
+ *   Parameters	:	void
+ *
+ *   Returns	:	void	
+ *
+ *   History	:   17-Apr-2018, Mark C Created
+ *
+***************************************************************************************************)
+
+IF (GVL.mb_Output_Coils[GVL.ENABLEFULLINIT] = FALSE) THEN		//do not process while initializing PLC
+	// For all fountains
+	FOR Index := 0 TO (GVL.w_MAXFOUNTAINS) DO
+		//Index := 5;  //debug a single fountain, one at a time, 0 to max-1
+		Index_offset := 0;		//ftns 1 to 6, WORDRUNTIME only
+		IF( Index > 5 )THEN
+			Index_offset := GVL.SWPWTR_7_10_FTN_OFFSET;	//ftns 7 to 10, WORDRUNTIME only
+		END_IF	
+		IF (GVL.mb_Output_Coils[GVL.ENABLEFOUNTAIN + Index] = TRUE) THEN // If Fountain enabled
+			w_InkTrim[Index]:= (GVL.mb_Output_Registers[GVL.SWEEPTRIM + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]); // Set Int Ink Trim to MB value
+				
+			IF ( w_InkTrim[Index] < GVL.mb_Output_Registers[GVL.MINSWEEPTRIM]) THEN 		//  If trim is less than minimum trim 
+				w_InkTrim[Index]:= GVL.mb_Output_Registers[GVL.MINWATERTRIM]; 			// set to minimum trim
+			END_IF
+			IF(w_InkTrim[Index] > GVL.mb_Output_Registers[GVL.MAXSWEEPTRIM]) THEN  	// if trim is greater then maximum trim 
+				w_InkTrim[Index]:= GVL.mb_Output_Registers[GVL.MAXWATERTRIM]; 			// set to maximum trim
+			END_IF		
+					
+					r_TargetInkTrim[Index]:= WORD_TO_REAL(w_InkTrim[Index]);
+					r_OutVolt := (GVL.r_InkOutputMax1PercentInt[Index]  * r_TargetInkTrim[Index]) + WORD_TO_REAL(GVL.w_InkInputIntMin[Index]); // Output voltage range is 0-32767, find a value that matches the percent trim
+					GVL_IO.InkSweepOut[Index]:= REAL_TO_INT(r_OutVolt);  // Set the output voltage)
+				
+		END_IF		//if this fountain is enabled
+	END_FOR		//all fountains
+END_IF		//not during full initialize
+	
+	]]></ST>
+    </Implementation>
+    <LineIds Name="FBInkSweep_Output">
+      <LineId Id="3" Count="36" />
+      <LineId Id="2" Count="0" />
+      <LineId Id="41" Count="4" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

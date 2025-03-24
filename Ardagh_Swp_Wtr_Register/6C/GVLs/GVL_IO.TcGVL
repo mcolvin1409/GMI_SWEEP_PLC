@@ -1,0 +1,74 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.10">
+  <GVL Name="GVL_IO" Id="{1f081d06-0ad0-4990-ad59-81e383e5ae44}">
+    <Declaration><![CDATA[{attribute 'qualified_only'}
+VAR_GLOBAL 
+
+///SDOC/////////////////////////////////////////////////////////////////////////
+//
+//  GVL_IO.TcGVL      - Global Variable List Input & Output mapping 
+//						to PLC terminal blocks - AVT PLC 
+//
+//  Author:         Mark Colvin                    Date: Nov 1, 2018
+//
+//	Beckhoff TC3 Structured Text for CX50x0 PLC
+//
+//	includes features:
+//		10 inker enables
+//		Ink ramping
+//		Water ramping
+//		Ink Surge
+//		Water Flood
+//		Ink Ducting (Hold Off)
+//		Ink Wash Up 
+//		Ink Function Control (Off/manual/auto)
+//		water Function Control (off/manual/auto)
+//		Inker positioner with feedback
+//		Water positioner with feedback
+//		Inker Analog Control
+//		water Analog Control
+//		Inker Positioner output cancel
+//		Water Positioner output cancel
+///////////////////////////////////////////////////////////////////////SDOCEND//
+
+
+b_DuctorControlA	AT%Q*	:ARRAY[0..GVL.w_MAXFOUNTAINS] OF BOOL;	//24 volts out
+b_DuctorControlB	AT%Q*	:ARRAY[0..GVL.w_MAXFOUNTAINS] OF BOOL;	//24 volts out
+b_Impression		AT%I*	:BOOL;							//24 volts inputs
+InkInput			AT%I*	:ARRAY[0..GVL.w_MAXFOUNTAINS] OF INT;  //0.000 to 9.999 volts in
+InkMotorFwd			AT%Q*	:ARRAY[0..GVL.w_MAXFOUNTAINS] OF BOOL;	//24 volts out
+InkMotorRvs			AT%Q*	:ARRAY[0..GVL.w_MAXFOUNTAINS] OF BOOL;	//24 volts out
+InkSurge			AT%Q*	:ARRAY[0..GVL.w_MAXFOUNTAINS] OF BOOL;	//24 volts out
+InkWashUp			AT%Q*	:ARRAY[0..GVL.w_MAXFOUNTAINS] OF BOOL;	//24 volts out
+d_PressSpeed		AT%I*		:DINT;				//0.000 to 9.999 volts in
+i_PressSpeed		AT%I*		:INT;				//0.000 to 9.999 volts in
+WaterSweepOut 		AT%Q*	:ARRAY[0..GVL.w_MAXFOUNTAINS] OF INT;	//0.000 to 9.999 volts out
+InkSweepOut			AT%Q*	:ARRAY[0..GVL.w_MAXFOUNTAINS] OF INT;	//0.000 to 9.999 volts out
+WaterInput			AT%I*	:ARRAY[0..GVL.w_MAXFOUNTAINS] OF INT;	//0.000 to 9.999 volts in
+WaterMotorFwd		AT%Q*	:ARRAY[0..GVL.w_MAXFOUNTAINS] OF BOOL;	//24 volts out
+WaterMotorRvs		AT%Q*	:ARRAY[0..GVL.w_MAXFOUNTAINS] OF BOOL;	//24 volts out
+
+// 0=Oper, 1=Gear
+	LateralMotorLimit AT %I*: ARRAY[0..GVL.w_MAXFOUNTAINS,  0..1] OF BOOL;
+// 0=Advance, 1=Retard
+	CircMotorLimit AT %I*: ARRAY [0..GVL.w_MAXFOUNTAINS,  0..1] OF BOOL;
+// 0=Oper, 1=Gear
+	LateralMotorRelay AT %Q*: ARRAY [0..GVL.w_MAXFOUNTAINS,  0..1] OF BOOL;
+// 0=Advance, 1=Retard
+	CircMotorRelay AT %Q*: ARRAY [0..GVL.w_MAXFOUNTAINS, 0..1] OF BOOL;
+// 0.000 to 9.999 volts in
+	LateralMotorPot AT %I*: ARRAY [0..GVL.w_MAXFOUNTAINS ] OF INT;
+// 0.000 to 9.999 volts in
+	CircMotorPot AT %I*: ARRAY [0..GVL.w_MAXFOUNTAINS] OF INT;
+
+// test only
+//b_Impression 	:BOOL:= TRUE;
+
+LateralMotorLimit1		AT%I*	:ARRAY[0..GVL.w_MAXFOUNTAINS] OF BOOL;	//0=Oper, 1=Gear
+
+
+END_VAR
+
+]]></Declaration>
+  </GVL>
+</TcPlcObject>

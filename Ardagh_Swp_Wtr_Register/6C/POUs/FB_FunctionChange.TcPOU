@@ -1,0 +1,139 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.10">
+  <POU Name="FB_FunctionChange" Id="{10ace57c-f670-4b87-8887-e20874478640}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FB_FunctionChange
+///SDOC/////////////////////////////////////////////////////////////////////////
+//
+//  FB_FunctionChange.TcPOU      - Function Block - watches changes in inker / water function - AVT PLC 
+//  Author:         Mark Colvin                        Date: June 7, 2018
+//
+//	Beckhoff TC3 Structured Text for CX50x0 PLC
+//
+//	includes features:
+//		10 inker enables
+//		Ink ramping
+//		Water ramping
+//		Ink Surge
+//		Water Flood
+//		Ink Ducting (Hold Off)
+//		Ink Wash Up 
+//		Ink Function Control (Off/manual/auto)
+//		water Function Control (off/manual/auto)
+//		Inker positioner with feedback
+//		Water positioner with feedback
+//		Inker Analog Control
+//		water Analog Control
+//		Inker Positioner output cancel
+//		Water Positioner output cancel
+///////////////////////////////////////////////////////////////////////SDOCEND//
+VAR_INPUT
+END_VAR
+VAR_OUTPUT
+END_VAR
+VAR
+	// === LOCAL DATA === NOT saved over power cycles 
+
+	//local temps for calcs
+	Index				:WORD;	//temp index for Fountain Loop
+	Index_offset		:WORD;								//index offset to runtime data for fountains 7 to 10; 0 or 220
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[
+IF (GVL.mb_Output_Coils[GVL.ENABLEFULLINIT] = FALSE) AND (GVL.mb_Output_Coils[GVL.ENABLERAMPINIT] = FALSE)THEN		//do not process while initializing PLC or ramping curves
+	FOR Index := 0 TO (GVL.w_MAXFOUNTAINS) DO		//normal operations - loop ALL the configured fountains
+		//Index :=1;
+		Index_offset := 0;		//ftns 1 to 6, WORDRUNTIME only
+		IF( Index > 5 )THEN
+			Index_offset := GVL.SWPWTR_7_10_FTN_OFFSET;	//ftns 7 to 10, WORDRUNTIME only
+		END_IF	
+		IF (GVL.mb_Output_Coils[GVL.ENABLEFOUNTAIN + Index] = TRUE) THEN  // If Fountain enabled
+																								// INK function changes
+			//if INK sweep function AUTO to MANUAL
+			IF( GVL.w_PreviousInkerFunction[Index] = GVL.AUTO_FUNCTION) THEN
+				//
+				IF GVL.mb_Output_Registers[GVL.INKFUNCTSETTING + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] = GVL.MANUAL_FUNCTION THEN
+					GVL.mb_Output_Coils[GVL.InkSweepRUN +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := TRUE;							//make the inker go back to trim value.
+//					GVL.mb_Output_Registers[GVL.SWEEPTRIMONPRESS + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] := 101; 				//make onpress invalid, force update
+					GVL.mb_Output_Registers[GVL.SWEEPTRIM + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] := GVL.w_PreviousInkTrimAuto[Index];	// restore ink trim from manual					
+				END_IF
+			END_IF
+			//if inker sweep function MANUAL to AUTO
+			IF( GVL.w_PreviousInkerFunction[Index] = GVL.MANUAL_FUNCTION) THEN
+				IF GVL.mb_Output_Registers[GVL.INKFUNCTSETTING + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] = GVL.AUTO_FUNCTION THEN
+					//
+					GVL.w_PreviousInkTrimAuto[Index] := GVL.mb_Output_Registers[GVL.SWEEPTRIM + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)];	// save ink trim from manual					
+				END_IF
+				//
+			END_IF
+
+			//if inker sweep function OFF to AUTO 
+			IF( GVL.w_PreviousInkerFunction[Index] = GVL.OFF_FUNCTION) THEN
+				//
+				IF GVL.mb_Output_Registers[GVL.INKFUNCTSETTING + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] = GVL.AUTO_FUNCTION THEN
+					// do nothing here										
+				END_IF
+			END_IF
+			
+			//if inker sweep function OFF to MANUAL 
+			IF( GVL.w_PreviousInkerFunction[Index] = GVL.OFF_FUNCTION) THEN
+				//
+				IF GVL.mb_Output_Registers[GVL.INKFUNCTSETTING + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] = GVL.MANUAL_FUNCTION THEN
+					// do nothing here										
+				END_IF
+			END_IF
+			//---------------
+																								// WATER function changes			
+			//if Water function AUTO to MANUAL
+			IF( GVL.w_PreviousWaterFunction[Index] = GVL.AUTO_FUNCTION) THEN
+				//
+				IF GVL.mb_Output_Registers[GVL.WATERFUNCTSETTING + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] = GVL.MANUAL_FUNCTION THEN
+					GVL.mb_Output_Coils[GVL.WtrControlRUN +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := TRUE;							//make the inker go back to trim value.
+//					GVL.mb_Output_Registers[GVL.WATERTRIMONPRESS + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] := 101; 					//make onpress invalid, force update
+					GVL.mb_Output_Registers[GVL.WATERTRIM + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] := GVL.w_PreviouswaterTrimAuto[Index];	// restore water trim from manual					
+				END_IF
+			END_IF
+			//if Water function MANUAL to AUTO
+			IF( GVL.w_PreviousWaterFunction[Index] = GVL.MANUAL_FUNCTION) THEN
+				//
+				IF GVL.mb_Output_Registers[GVL.WATERFUNCTSETTING + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] = GVL.AUTO_FUNCTION THEN
+					//
+					GVL.w_PreviouswaterTrimAuto[Index] := GVL.mb_Output_Registers[GVL.WATERTRIM + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)];	// save water trim from manual					
+				END_IF
+			END_IF
+
+			//if Water function OFF to AUTO 
+			IF( GVL.w_PreviousWaterFunction[Index] = GVL.OFF_FUNCTION) THEN
+				//
+				IF GVL.mb_Output_Registers[GVL.WATERFUNCTSETTING + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] = GVL.AUTO_FUNCTION THEN
+					// do nothing here					
+				END_IF
+			END_IF
+			
+			//if Water function OFF to MANUAL 
+			IF( GVL.w_PreviousWaterFunction[Index] = GVL.OFF_FUNCTION) THEN
+				//
+				IF GVL.mb_Output_Registers[GVL.WATERFUNCTSETTING + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] = GVL.MANUAL_FUNCTION THEN
+					// do nothing here										
+				END_IF
+			END_IF
+			
+
+			GVL.w_PreviousInkerFunction[Index] := GVL.mb_Output_Registers[GVL.INKFUNCTSETTING + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]; 		//save previous INK function for this inker
+			GVL.w_PreviousWaterFunction[Index] := GVL.mb_Output_Registers[GVL.WATERFUNCTSETTING + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]; 	//save previous WATER function for this inker
+		END_IF			//ftn enabled
+	END_FOR		//ftn loop
+END_IF // not full init nor ramping init
+
+//---------------------- end of FB_FuntionChange.TcPOU ----------------------------
+	  
+]]></ST>
+    </Implementation>
+    <LineIds Name="FB_FunctionChange">
+      <LineId Id="38" Count="81" />
+      <LineId Id="9" Count="0" />
+      <LineId Id="120" Count="4" />
+      <LineId Id="2" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

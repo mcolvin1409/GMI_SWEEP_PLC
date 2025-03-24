@@ -1,0 +1,172 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.10">
+  <POU Name="FBWaterFlood" Id="{96bb41b3-9ec2-4b1b-937a-8b5e4b245f7a}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FBWaterFlood
+VAR_INPUT
+END_VAR
+VAR_OUTPUT
+END_VAR
+VAR
+	// === LOCAL DATA === NOT saved over power cycles
+	CountDownTON			:ARRAY[0..GVL.w_MAXFOUNTAINS] OF TON;
+	Index				:WORD:= 0;
+	Index_offset			:WORD;								//index offset to runtime data for fountains 7 to 10; 0 or 220
+	WaterFloodTON			:ARRAY[0..GVL.w_MAXFOUNTAINS] OF TON;
+	FloodTimeValue		:ARRAY[0..GVL.w_MAXFOUNTAINS] OF TIME;
+	TempFloodTime			:TIME;
+	s_CountDownTime		:ARRAY[0..GVL.w_MAXFOUNTAINS] OF STRING[5];  // used to 'display' (post) the countdown time
+
+	
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[(************************************************************************************************
+ *
+ *   FUNCTION BLOCK	:FBWaterFlood
+ *
+ *   Author		:	Gary Stefancik
+ *
+ *   Description:	Perform Water Flood.  Start/stop water flood motors for a user defined period of time while in auto mode (ramping) 
+ *
+ *   Parameters	:	void
+ *
+ *   Returns	:	void	
+ *
+ *   History	:   29-Oct-17, 	GaryS 	Created
+ *					14-Nov-17	GaryS	Ardagh: Allow Flood in manual/auto and impression on/off WI 143332
+ *				12-Dec-17	Mark C Removed the magic number with macros WI 143332
+ *
+***************************************************************************************************)
+
+
+FOR Index:= 0 TO (GVL.w_MAXFOUNTAINS) DO 
+	//Index := 5;  //debug a single fountain, one at a time, 0 to max-1
+	Index_offset := 0;		//ftns 1 to 6, WORDRUNTIME only
+	IF( Index > 5 )THEN
+		Index_offset := GVL.SWPWTR_7_10_FTN_OFFSET;	//ftns 7 to 10, WORDRUNTIME only
+	END_IF	
+	IF ((GVL.mb_Output_Coils[GVL.ENABLEFOUNTAIN + Index] = TRUE) AND
+		(GVL.mb_Output_Coils[GVL.ENABLEWATERFLOOD] = TRUE))	THEN  // Enabled Fountain and Enabled Flood feature
+		
+		// Get time value from MB
+		TempFloodTime:= ( GVL.mb_Output_Registers[GVL.WATERFLOODTIME + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] * T#1000MS); // Get flood start time from MB (seconds -> ms)
+		// Process new value if not zero
+		IF (TempFloodTime > T#0MS) THEN
+			IF (WaterFloodTON[Index].IN = TRUE) THEN // If Flooding in progress
+				TempFloodTime:=  T#0MS;  												// If flood is already on, then no new time accepted
+				GVL.mb_Output_Registers[GVL.WATERFLOODTIME + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]:= 0; // FloodTimeSet reset
+			ELSE  				// Initialize flood time  
+				FloodTimeValue[Index]:= TempFloodTime; 		//save start time
+				TempFloodTime:= T#0MS;  					// reset temp
+				GVL.mb_Output_Registers[GVL.WATERFLOODTIME + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]:= 0; 		// FloodTimeSet reset
+				IF (FloodTimeValue[Index] > GVL.mb_Output_Registers[GVL.MAXWATERFLOODTIME] * T#1000MS) THEN // If the start time is greater than max
+ 					FloodTimeValue[Index]:= GVL.mb_Output_Registers[GVL.MAXWATERFLOODTIME] * T#1000MS;
+				END_IF
+			END_IF
+		END_IF
+
+		IF (GVL.mb_Output_Registers[GVL.PRESSSPEEDFPM]  = 0) AND (GVL.b_FloodOn[Index] = TRUE)THEN //  below min press speed  (stopped) and flood is ON
+				GVL.mb_Output_Coils[GVL.CANCELWATERFLOOD + (Index * GVL.BOOLRUNTIMEGROUPSIZE)] := TRUE;
+		END_IF
+	
+		//SHUTDOWN
+			IF ((WaterFloodTON[Index].Q  = TRUE) OR 													// Timer is finished or 
+				(GVL.mb_Output_Coils[GVL.CANCELWATERFLOOD + (Index * GVL.BOOLRUNTIMEGROUPSIZE)] = TRUE)) THEN // cancel flood is TRUE
+	 				WaterFloodTON[Index].IN:= FALSE; 						// Reset timer for next run
+					GVL.b_FloodOn[Index]:= FALSE; 							// Inform Water Sweep Flood is FALSE to set to Normal Trim
+					GVL.mb_Output_Registers[GVL.WATERTRIM + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]:= GVL.w_PreviousWaterTrimFlood[Index]; // Restore original trim 
+					GVL.mb_Output_Registers[GVL.WATERFLOODCOUNTDOWN + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]:= 0; 				// Set CountDown Time to 0 in MB  
+					IF (GVL.mb_Output_Coils[GVL.CANCELWATERFLOOD + (Index * GVL.BOOLRUNTIMEGROUPSIZE)] = TRUE) THEN // If cancel flood TRUE
+						GVL.mb_Output_Coils[GVL.CANCELWATERFLOOD + (Index * GVL.BOOLRUNTIMEGROUPSIZE)]:= FALSE;  		// Reset cancel water flood
+					END_IF
+			END_IF 	
+
+		//STARTUP
+		// If Timer is off and WaterFloodTime is > 0 Then restart timer
+		IF ((WaterFloodTON[Index].IN = FALSE) AND  					// Timer is off and
+			(FloodTimeValue[Index] > T#0MS)) THEN 					// A value has come in from the MB
+				GVL.w_PreviousWaterTrimFlood[Index]:= GVL.mb_Output_Registers[GVL.WATERTRIM + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]; // Preserve original trim 
+				GVL.b_FloodOn[Index]:= TRUE; 							// Inform Water sweep that flood is TRUE to set Max Trim
+				GVL.mb_Output_Registers[GVL.WATERTRIM + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] := GVL.mb_Output_Registers[GVL.WATERFLOODTRIMSETTING];	// set flood trim value
+//				GVL.mb_Output_Coils[GVL.Water_RUNNING +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := TRUE;  			//  changing the water value now
+				GVL.mb_Output_Coils[GVL.WtrControlRUN +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := TRUE;		// set trim & force	
+				GVL.mb_Output_Registers[GVL.WATERTRIMONPRESS + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] := 101; //make onpress invalid, force update
+				WaterFloodTON[Index].PT:= FloodTimeValue[Index]; 		// Set PT to  Flood Time Value
+				FloodTimeValue[Index]:= T#0MS; 							// Set Flood Time Value to T#0ms (reset)
+				WaterFloodTON[Index].IN:= TRUE;							// Turn on timer
+		END_IF		
+	
+		// Execute Flood Timer
+		WaterFloodTON[INDEX](IN:= , PT:= , Q=> , ET=> );// Run TON if IN is TRUE, set Q TRUE when finished
+		
+		// Process Count Down Timer
+		IF ((CountDownTON[Index].Q = TRUE) AND
+			(WaterFloodTON[Index].IN = TRUE)) THEN
+			// be sure the trim is set to FLOOD trim value
+				GVL.mb_Output_Registers[GVL.WATERTRIM + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] := GVL.mb_Output_Registers[GVL.WATERFLOODTRIMSETTING];	// set flood trim value
+				GVL.mb_Output_Coils[GVL.WtrControlRUN +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := TRUE;		// set trim & force	
+				GVL.mb_Output_Registers[GVL.WATERTRIMONPRESS + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)] := 101; //make onpress invalid, force update
+			
+			s_CountDownTime[Index]:= TIME_TO_STRING(WaterFloodTON[Index].PT - WaterFloodTON[Index].ET);
+			s_CountDownTime[Index]:= Delete(s_CountDownTime[Index],2,1);
+			CountDownTON[Index].IN:= TRUE;	
+		
+			// Extract count down time and put into Modbus
+			IF (FIND(s_CountDownTime[Index], 's') = 0) THEN  // if in 3 digit milliseconds 
+				GVL.mb_Output_Registers[GVL.WATERFLOODCOUNTDOWN + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]:= 0; // Set FloodCountdown to 0 
+			ELSIF (FIND(s_CountDownTime[Index], 'm') <> 0) THEN // if in 2 or 1 digit milliseconds 
+				GVL.mb_Output_Registers[GVL.WATERFLOODCOUNTDOWN + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]:= 0; // Set FloodCountdown to 0 
+			ELSIF (FIND(s_CountDownTime[Index], 's') = 2) THEN  // time is 1 digit of seconds
+				s_CountDownTime[Index]:= Delete(s_CountDownTime[Index], 4, 2);
+				GVL.mb_Output_Registers[GVL.WATERFLOODCOUNTDOWN + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]:= STRING_TO_WORD(s_CountDownTime[Index]);   
+			ELSIF (FIND(s_CountDownTime[Index], 's') = 3) THEN // time is in 2 digits of seconds
+				s_CountDownTime[Index]:= Delete(s_CountDownTime[Index], 1, 3);
+				GVL.mb_Output_Registers[GVL.WATERFLOODCOUNTDOWN + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]:= STRING_TO_WORD(s_CountDownTime[Index]);
+			END_IF
+		END_IF
+		
+		// Execute CountDown Timer
+		IF (WaterFloodTON[Index].IN = TRUE) THEN
+			CountDownTON[Index].IN:= TRUE;
+			CountDownTON[Index].PT:= T#1S;
+			CountDownTON[Index](IN:= , PT:= , Q=> , ET=> );
+		END_IF
+		
+	END_IF  // Fountain and flood enabled
+END_FOR // each fountain 
+
+]]></ST>
+    </Implementation>
+    <LineIds Name="FBWaterFlood">
+      <LineId Id="756" Count="19" />
+      <LineId Id="795" Count="0" />
+      <LineId Id="897" Count="0" />
+      <LineId Id="896" Count="0" />
+      <LineId Id="797" Count="1" />
+      <LineId Id="800" Count="2" />
+      <LineId Id="805" Count="2" />
+      <LineId Id="809" Count="7" />
+      <LineId Id="957" Count="3" />
+      <LineId Id="817" Count="1" />
+      <LineId Id="821" Count="0" />
+      <LineId Id="824" Count="8" />
+      <LineId Id="834" Count="4" />
+      <LineId Id="898" Count="0" />
+      <LineId Id="935" Count="0" />
+      <LineId Id="899" Count="1" />
+      <LineId Id="917" Count="0" />
+      <LineId Id="934" Count="0" />
+      <LineId Id="839" Count="1" />
+      <LineId Id="842" Count="0" />
+      <LineId Id="844" Count="8" />
+      <LineId Id="937" Count="0" />
+      <LineId Id="939" Count="1" />
+      <LineId Id="936" Count="0" />
+      <LineId Id="853" Count="26" />
+      <LineId Id="10" Count="0" />
+      <LineId Id="2" Count="0" />
+      <LineId Id="114" Count="3" />
+      <LineId Id="961" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

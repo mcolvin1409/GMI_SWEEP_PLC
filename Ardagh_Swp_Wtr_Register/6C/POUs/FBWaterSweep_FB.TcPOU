@@ -1,0 +1,205 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.6">
+  <POU Name="FBWaterSweep_FB" Id="{0e2b3eaf-2a23-4849-aca2-a07dfc7ce47b}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FBWaterSweep_FB
+VAR_INPUT
+END_VAR
+VAR_OUTPUT
+END_VAR
+VAR
+///SDOC/////////////////////////////////////////////////////////////////////////
+//
+//  FBWaterSweep_FB.TcPOU      - Function Block - Water positioner control with pot feedback - AVT PLC 
+//						Version 2
+//  Author:         Mark Colvin                        Date: Apr 7, 2018
+//
+//	Beckhoff TC3 Structured Text for CX50x0 PLC
+//
+//	includes features:
+//		10 inker enables
+//		Ink ramping
+//		Water ramping
+//		Ink Surge
+//		Water Flood
+//		Ink Ducting (Hold Off)
+//		Ink Wash Up 
+//		Ink Function Control (Off/manual/auto)
+//		water Function Control (off/manual/auto)
+//		Inker positioner with feedback
+//		Water positioner with feedback
+//		Inker Analog Control
+//		water Analog Control
+//		Inker Positioner output cancel
+//		Water Positioner output cancel
+///////////////////////////////////////////////////////////////////////SDOCEND//
+	// === LOCAL DATA === NOT saved over power cycles
+	
+	//FB_PlusMinusWithFB_arr	:FB_PlusMinusWithFB;  //debug the PlusMinusWithFB FB, only single ftn with one set of locals
+	FB_PlusMinusWithFB_arr	:ARRAY[0..GVL.w_MAXFOUNTAINS] OF FB_PlusMinusWithFB;  //normal operations, each fountain has own local variables
+	nScreenValceu				:WORD;								//???
+	Index					:WORD;								// temp word for loop fountain index
+	Index_offset			:WORD;								//index offset to runtime data for fountains 7 to 10; 0 or 220
+	w_itrgt					:WORD;								// temp index for target sweep % in MB array
+	w_icmpr					:WORD;								//temp index for on-press sweep % in MB array
+	w_Actual					:WORD;						//temp A2D FB value
+	bError					:ARRAY [0..GVL.w_MAXFOUNTAINS] OF BOOL;	//error recorded from PlusMinuswithFB FB
+	wError					:WORD;							//temp error code to process later
+	bRESET					:ARRAY [0..GVL.w_MAXFOUNTAINS] OF BOOL;	//request to PlusMinusWithFB FB to reset any error seen previously
+	w_halfpercent				:ARRAY [0..GVL.w_MAXFOUNTAINS] OF WORD;	// 1 percent ticks halved
+	w_target_ticks			:ARRAY [0..GVL.w_MAXFOUNTAINS] OF WORD;	// current target ticks
+	
+	iEn: INT;					// parm to PlusMinusWithFB - enable of fountain used in FB, this should be a BOOL
+	iActual: INT;					// parm to PlusMinusWithFB - actual A2D value from FB circuit for this fountain - 1 to 32768
+	iScaleActualUnits: WORD;		// parm to PlusMinusWithFB - max value of units of the requested target (% water sweep) - usually 99%
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[
+(************************************************************************************************
+ *
+ *   FUNCTION BLOCK	:FBWaterSweep_FB
+ *
+ *   Author		:	Mark Colvin			Date Apr 7, 2018
+ *
+ *   Description:	Perform water positioner control of Water.  Adjust user controlled water trim value while in manual mode 
+ *
+ *   Parameters	:	Global Variables for configuration parameters
+ *
+ *   Returns	:		changes to Global Variables and Global IO controls
+ *
+ *   History	:   29-Oct-17, GaryS Created
+ *				12-Dec-17	Mark C Removed the magic number with macros WI 143322
+ *				18-Jan-18	Mark C added logging of various program states to VS IDE output/error window
+ *				7-Feb-18 	Mark C new Function Block based on DCOS sample of the 
+ *									same type of control called PlusMinusWithPotFB
+ *				7-Apr-18		Mark C convert from Ink Sweep positioner FB
+***************************************************************************************************)
+
+//FB_PlusMinusWithFB_arr[1].iRequested	:= nScreenValceu;  //not sure what this is doing here
+
+IF (GVL.mb_Output_Coils[GVL.ENABLEFULLINIT] = FALSE) THEN		//do not process while initializing PLC
+
+	FOR Index := 0 TO GVL.w_MAXFOUNTAINS DO		//normal operations - loop ALL the configured fountains
+	//Index := 9;  //debug a single fountain, one at a time, 0 to max-1
+		Index_offset := 0;		//ftns 1 to 6, WORDRUNTIME only
+		IF( Index > 5 )THEN
+			Index_offset := GVL.SWPWTR_7_10_FTN_OFFSET;	//ftns 7 to 10, WORDRUNTIME only
+		END_IF	
+
+		bError[Index] := FALSE;				//clear local error flag for each fountain
+		w_itrgt := GVL.WATERTRIM + (Index * GVL.WORDRUNTIMEGROUPSIZE);
+		IF( GVL.mb_Output_Coils[GVL.ENABLEFOUNTAIN + Index] ) THEN				// check if fountain enabled,
+			IF( GVL.mb_Output_Coils[GVL.WtrControl_OFF +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] = FALSE ) THEN		//test if this water sweep is NOT disabled with function OFF 
+				IF( GVL.mb_Output_Coils[GVL.CancelWaterPositioner +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] = FALSE ) THEN		//test disable Water positioner mtr outputs from slave
+					//test current water trim % request with last % request, move positioner if not same - keeps motors from moving during reset condition - RUN boolean forces another attempt
+					IF(( GVL.mb_Output_Registers[w_itrgt] <> GVL.w_LastwaterTrim[Index]) OR GVL.mb_Output_Coils[GVL.WtrControlRUN +(Index * GVL.BOOLRUNTIMEGROUPSIZE)]) THEN
+						IF( GVL_IO.WaterInput[Index] > 0 ) THEN							// is FB circuit value valid, process normally
+							//test current water trim target % with current on-press % value, move positioner if not same - keeps the motors moving toward target
+							w_icmpr := GVL.WATERTRIMONPRESS + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE);
+							IF( GVL.mb_Output_Registers[w_itrgt] <> GVL.mb_Output_Registers[w_icmpr]) THEN
+								IF (GVL.mb_Output_Coils[GVL.PLCerrorLastRequestWtr+(Index * GVL.BOOLRUNTIMEGROUPSIZE)]) THEN
+									bRESET[Index] := TRUE;								// set bool to clear error condition in PlusMinus FB
+								END_IF
+						
+								FB_PlusMinusWithFB_arr[Index](    //normal operations
+								//FB_PlusMinusWithFB_arr(			//debug the PlusMinusWithFB FB with one index
+									iEn					:= GVL.mb_Output_Coils[GVL.ENABLEFOUNTAIN + Index] , 	// need to be TRUE for activating any output of water positioner
+									iActual				:= INT_TO_WORD(GVL_IO.WaterInput[Index]), 				// actual potentiometer value from FB circuit, 0 means missing, 1 to 32768 normal
+									iRequested			:= GVL.mb_Output_Registers[w_itrgt], 			// Requested target value of water positioner, in % sweep
+									iRESET				:= bRESET[Index], 								// reset any fault seen previously
+									iNrOfStuckCycles	:= GVL.POSTIONER_TIMEOUT, 						// number of PLC scan cycles until FB gives warning at 1ms PLC cycle time; 4000 = 4s
+									iScaleActualMinVal	:= GVL.w_WaterOutputIntMin[Index], 				// min A2D value from FB circuit, regarded as ZERO % sweep
+									iScaleActualMaxVal	:= GVL.w_WaterOutputIntMax[Index],					// maximum A2D value from pot circuit, regarded as MAX % sweep
+									iScaleActualUnits	:= GVL.mb_Output_Registers[GVL.MAXWATERTRIM], 	// units of requested target(max target value requested)
+									iSETUP_jerkIfClose	:= GVL.PULSE_WHEN_CLOSE_OPTION,  				// flag to tweak motor output to reach target value if close (if motors are fast)
+									qInc				=> GVL_IO.WaterMotorFwd[Index], 		// motor output BOOL for forward direction of water positioner motor (positive)
+									qDec				=> GVL_IO.WaterMotorRvs[Index], 		//motor output BOOL for reverse direction of water positioner motor	(negative)
+									qWarningStuck		=> bError[Index],					// error flag for motor/FB stuck error
+									qErrorCode			=> wError);								//Error code if error flag
+								IF(bError[Index] = TRUE) THEN
+									wError :=	(wError * 100) + Index+1;					//add the fountain index to the error code to log to AS
+								ELSE
+									GVL.mb_Output_Coils[GVL.Water_RUNNING +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := TRUE;		//flag water trim motor moving
+								END_IF
+								w_Actual := INT_TO_WORD(GVL_IO.WaterInput[Index]);							//actual analog FeedBack value is captured here
+								IF(	INT_TO_WORD(GVL_IO.WaterInput[Index]) < GVL.w_WaterOutputIntMin[Index]) THEN	//if lower than minimum, don't go lower.
+									GVL_IO.WaterMotorRvs[Index] := FALSE;							//turn off that direction
+									w_Actual := GVL.w_WaterOutputIntMin[Index];					//fudge actual value to be min limit
+								END_IF		
+							
+								IF(	INT_TO_WORD(GVL_IO.WaterInput[Index]) > GVL.w_WaterOutputIntMax[Index]) THEN	//if greater than maximum, don't go higher.
+									GVL_IO.WaterMotorFwd[Index] := FALSE;						//turn off that direction
+									w_Actual := GVL.w_WaterOutputIntMax[Index];					//fudge actual value to be max limit
+								END_IF		
+					
+								// last % sweep trgt        curr analog     min analog allowed            max sweep %			//calc current % trim value from curr analog value
+								GVL.w_LastWaterTrim[Index] := (w_Actual - GVL.w_WaterOutputIntMin[Index]) * (GVL.mb_Output_Registers[GVL.MAXWATERTRIM]+1) / 
+																	(GVL.w_WaterOutputIntMax[Index] - GVL.w_WaterOutputIntMin[Index]);	
+																	// max analog allowed - min analog allowed
+
+								w_halfpercent[Index] := REAL_TO_WORD(GVL.r_WaterOutput1PercentInt[Index] /2.0);   //number of A2D ticks for 0.5%
+								w_target_ticks[Index] := REAL_TO_WORD(GVL.r_WaterOutput1PercentInt[Index]) * GVL.mb_Output_Registers[GVL.WATERTRIM + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]; 
+								IF(	(GVL.w_LastWaterTrim[Index] = GVL.mb_Output_Registers[GVL.WATERTRIM + Index_offset + (Index * GVL.WORDRUNTIMEGROUPSIZE)]) ) OR //fudge the last trim setting ticks to +/- 0.5%
+									( (w_Actual < (w_target_ticks[Index]+w_halfpercent[Index]) ) AND	// of the requested target or calc'd sweep value is EQUAL
+									(w_Actual > (w_target_ticks[Index]-w_halfpercent[Index]) ) ) THEN
+										GVL.w_LastWaterTrim[Index] := GVL.mb_Output_Registers[w_itrgt];	// last trim is now requested target trim
+								END_IF
+																							//we want current trim %, not the target trim %
+								GVL.mb_Output_Registers[w_icmpr]:= GVL.w_LastWaterTrim[Index];  	// update ON-PRESS trim % to current water location
+								GVL.mb_Output_Coils[GVL.PLCerrorLastRequestWtr+(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;	// reset bool to show AS no longer in error condition
+							ELSE							//no move needed if trgt and on-press are same
+								GVL_IO.WaterMotorFwd[Index] := FALSE;										//reset BOTH direction outputs, no move, no error 
+								GVL_IO.WaterMotorRvs[Index] := FALSE;
+								GVL.mb_Output_Coils[GVL.Water_RUNNING +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE; 
+								bError[Index] 			:= FALSE;
+								wError 					:= 0;
+							END_IF										// test the curr trgt% with curr on-press% value
+						ELSE
+							bError[Index] := 	TRUE;							//if enabled and zero feedback signal, this is an error.
+							wError :=	(GVL.MISSINGFBSIGNAL * 100) + Index+1;
+						END_IF										
+					ELSE					// curr trgt% is same as last request%; no move required, no error
+						GVL_IO.WaterMotorFwd[Index] := FALSE;										//reset BOTH direction outputs, no move, no error 
+						GVL_IO.WaterMotorRvs[Index] := FALSE;
+						GVL.mb_Output_Coils[GVL.Water_RUNNING +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE; 
+						bError[Index] 			:= FALSE;
+						wError 					:= 0;
+					END_IF
+				ELSE						//cancel output is TRUE, stop the motor outputs now and read current on-press value, set oper request error
+					bError[Index] := 	TRUE;							//oper request cancel, this is an error.
+					wError :=		(GVL.WTRPOSITCANCEL * 100) + Index+1;
+					GVL.mb_Output_Coils[GVL.CancelWaterPositioner +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;	//reset the output cancel bit here
+				END_IF
+				IF(bError[Index] ) THEN								//if error code from PlusMinusWithPot FB or FB signal missing or Cancel Output from slave
+					FProcessError(ErrorNumber:= wError ); 				// Set water Input Feedback Error for AppServer to process. 
+					bRESET[Index] := TRUE;										//reset this error indication for next fountain
+					GVL.mb_Output_Coils[GVL.PLCerrorLastRequestWtr+(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := TRUE;		// set bool to show AS error condition
+					GVL_IO.WaterMotorFwd[Index] := FALSE;							//reset BOTH direction outputs, no move if error
+					GVL_IO.WaterMotorRvs[Index] := FALSE;
+					GVL.mb_Output_Coils[GVL.Water_RUNNING +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE; 
+					GVL.w_LastWaterTrim[Index] := GVL.mb_Output_Registers[w_itrgt];	// last trim is now requested target trim
+				ELSE
+					bRESET[Index] := FALSE;													//no error, reset error indication for next fountain anyway
+				END_IF	
+				GVL.mb_Output_Coils[GVL.WtrControlRUN +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE;	//not running now
+			ELSE				//if ftn disabled with OFF function
+				GVL_IO.WaterMotorFwd[Index] := FALSE;							//reset BOTH direction outputs, not moving if function is OFF
+				GVL_IO.WaterMotorRvs[Index] := FALSE;
+				GVL.mb_Output_Coils[GVL.Water_RUNNING +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE; 
+			END_IF   // test disable water sweep
+		ELSE				//if ftn not enabled
+			GVL_IO.WaterMotorFwd[Index] := FALSE;							//reset BOTH direction outputs, not moving if not enabled
+			GVL_IO.WaterMotorRvs[Index] := FALSE;
+			GVL.mb_Output_Coils[GVL.Water_RUNNING +(Index * GVL.BOOLRUNTIMEGROUPSIZE)] := FALSE; 
+		END_IF 	
+	END_FOR 	//normal operations - loop all fountains here
+END_IF		//not initializing PLC test
+	]]></ST>
+    </Implementation>
+    <LineIds Name="FBWaterSweep_FB">
+      <LineId Id="3" Count="133" />
+      <LineId Id="2" Count="0" />
+      <LineId Id="138" Count="1" />
+    </LineIds>
+  </POU>
+</TcPlcObject>
